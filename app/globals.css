@@ -1,26 +1,98 @@
 @import "tailwindcss";
 
+/*
+ * Palette tuned for a phone held under bright hall lighting: high contrast, few hues,
+ * and status colours that stay distinguishable at a glance while walking.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --canvas: #f6f7f9;
+  --surface: #ffffff;
+  --surface-sunk: #f1f3f6;
+  --line: #dfe3e8;
+  --ink: #10151c;
+  --muted: #626d7d;
+  --accent: #3d47d4;
+  --accent-ink: #ffffff;
+  --accent-soft: #ecedfd;
+  --success: #0a7a52;
+  --success-soft: #e2f5ed;
+  --warning: #9a5b00;
+  --warning-soft: #fdf0dc;
+  --danger: #c22626;
+  --danger-soft: #fdeaea;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --canvas: #0c0f14;
+    --surface: #151a22;
+    --surface-sunk: #1d232d;
+    --line: #2a323e;
+    --ink: #eef1f5;
+    --muted: #98a3b3;
+    --accent: #7d86f5;
+    --accent-ink: #0c0f14;
+    --accent-soft: #1e2340;
+    --success: #46c79a;
+    --success-soft: #10281f;
+    --warning: #e0a44a;
+    --warning-soft: #2b1f0c;
+    --danger: #f07070;
+    --danger-soft: #2c1414;
   }
 }
 
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-sunk: var(--surface-sunk);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+/*
+ * Judges tap these while holding a bag and a coffee. Suppressing the double-tap-to-zoom
+ * delay and the grey tap flash makes the segmented score buttons feel like native
+ * controls rather than a web page.
+ */
+@media (pointer: coarse) {
+  button,
+  a,
+  [role="button"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Keep the score buttons from being text-selected during a fast double tap. */
+.no-select {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
