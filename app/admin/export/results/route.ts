@@ -1,6 +1,6 @@
 import { getAdmin } from "@/lib/auth/admin";
 import { csvResponse, toCsv } from "@/lib/csv";
-import { db } from "@/lib/supabase/admin";
+import { query } from "@/lib/db";
 import {
   getCriteria,
   getPrimaryEvent,
@@ -31,13 +31,34 @@ export async function GET(request: Request) {
   if (type === "raw") {
     const criteria = await getCriteria(event.id);
 
-    const { data: rows } = await db()
-      .from("submissions")
-      .select(
-        "poster_id, submitted_at, comment, judges(name), posters(code, title), submission_scores(criterion_id, value)",
-      )
-      .eq("event_id", event.id)
-      .eq("status", "submitted");
+    type RawRow = {
+      poster_code: string;
+      poster_title: string;
+      judge_name: string;
+      comment: string | null;
+      submitted_at: string | null;
+      scores: Record<string, number> | null;
+    };
+
+    // One join instead of PostgREST's embedded-resource syntax. The per-criterion
+    // values come back as a single jsonb object so the row order below stays stable.
+    const rows = await query<RawRow>(
+      `select p.code  as poster_code,
+              p.title as poster_title,
+              j.name  as judge_name,
+              s.comment,
+              s.submitted_at,
+              (select jsonb_object_agg(ss.criterion_id, ss.value)
+                 from submission_scores ss
+                where ss.submission_id = s.id) as scores
+         from submissions s
+         join posters p on p.id = s.poster_id
+         join judges  j on j.id = s.judge_id
+        where s.event_id = $1
+          and s.status = 'submitted'
+        order by p.code, j.name`,
+      [event.id],
+    );
 
     const body = toCsv(
       [
@@ -48,24 +69,13 @@ export async function GET(request: Request) {
         "comment",
         "submitted_at",
       ],
-      (rows ?? []).map((row) => {
-        const one = <T,>(v: T | T[] | null): T | null =>
-          Array.isArray(v) ? (v[0] ?? null) : v;
-        const poster = one(row.posters) as { code: string; title: string } | null;
-        const judge = one(row.judges) as { name: string } | null;
-
-        const scores = new Map(
-          (row.submission_scores ?? []).map(
-            (s: { criterion_id: string; value: number }) =>
-              [s.criterion_id, s.value] as const,
-          ),
-        );
-
+      rows.map((row) => {
+        const scores = row.scores ?? {};
         return [
-          poster?.code ?? "",
-          poster?.title ?? "",
-          judge?.name ?? "",
-          ...criteria.map((c) => scores.get(c.id) ?? ""),
+          row.poster_code,
+          row.poster_title,
+          row.judge_name,
+          ...criteria.map((c) => scores[c.id] ?? ""),
           row.comment ?? "",
           row.submitted_at ?? "",
         ];

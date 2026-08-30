@@ -10,9 +10,9 @@ import {
   setJudgeCookie,
   signJudgeToken,
 } from "@/lib/auth/judge-session";
-import { clientIp, isRateLimited, recordFailedAttempt } from "@/lib/auth/rate-limit";
+import { isRateLimited, recordFailedAttempt } from "@/lib/auth/rate-limit";
+import { one, query } from "@/lib/db";
 import { env } from "@/lib/env";
-import { db } from "@/lib/supabase/admin";
 
 /**
  * Server Actions are reachable by direct POST, not only through the UI, so every one of
@@ -28,36 +28,39 @@ export async function signIn(
   const raw = String(formData.get("code") ?? "");
   const code = normalizeCode(raw);
 
-  const ip = await clientIp();
-  if (await isRateLimited(ip)) {
+  // The limiter is keyed on what was typed, not on the client's IP — see
+  // lib/auth/rate-limit.ts for why an IP key is wrong on a LAN. A malformed entry has
+  // no canonical form, so it is bucketed under the hash of the raw input: junk still
+  // counts as an attempt, but only against itself.
+  const attemptKey = hashCode(code ?? `raw:${raw.slice(0, 64)}`, env.judgeCodePepper);
+
+  if (await isRateLimited(attemptKey)) {
     return { error: "Too many attempts. Wait 15 minutes and try again." };
   }
 
   // A malformed code never reaches the database, but it still counts as an attempt so
   // the limiter cannot be bypassed by sending junk.
   if (!code) {
-    await recordFailedAttempt(ip);
+    await recordFailedAttempt(attemptKey);
     return { error: "That code doesn't look right. Check for typos." };
   }
 
-  const { data: judge } = await db()
-    .from("judges")
-    .select("id, event_id, active")
-    .eq("code_hash", hashCode(code, env.judgeCodePepper))
-    .maybeSingle();
+  const judge = await one<{ id: string; event_id: string; active: boolean }>(
+    "select id, event_id, active from judges where code_hash = $1",
+    [hashCode(code, env.judgeCodePepper)],
+  );
 
   if (!judge || !judge.active) {
-    await recordFailedAttempt(ip);
+    await recordFailedAttempt(attemptKey);
     // Deliberately identical to the malformed-code message: distinguishing "no such
     // code" from "code deactivated" would confirm which codes exist.
     return { error: "That code doesn't look right. Check for typos." };
   }
 
-  const { data: event } = await db()
-    .from("events")
-    .select("status")
-    .eq("id", judge.event_id)
-    .single();
+  const event = await one<{ status: string }>(
+    "select status from events where id = $1",
+    [judge.event_id],
+  );
 
   if (event?.status === "draft") {
     return { error: "Judging hasn't opened yet. Check with the organisers." };
@@ -89,22 +92,25 @@ async function save(
 
   // save_submission re-verifies that the poster belongs to this judge's event and that
   // the event is still active, and does the write atomically.
-  const { error } = await db().rpc("save_submission", {
-    p_judge_id: session.judgeId,
-    p_poster_id: posterId,
-    p_status: status,
-    p_comment: comment,
-    p_scores: scores,
-  });
-
-  if (error) {
+  try {
+    await query("select save_submission($1, $2, $3, $4, $5::jsonb)", [
+      session.judgeId,
+      posterId,
+      status,
+      comment,
+      JSON.stringify(scores),
+    ]);
+  } catch (error) {
+    // The function raises these with errcode P0001; Postgres puts the raised message in
+    // the error text, so matching on it is the same contract as before.
     const known: Record<string, string> = {
       event_not_active: "Judging has closed for this event.",
       poster_not_in_event: "That poster isn't part of your event.",
       judge_not_found: "Your judge account is no longer active.",
     };
-    const message = Object.keys(known).find((key) => error.message.includes(key));
-    return { ok: false, error: message ? known[message] : "Couldn't save. Try again." };
+    const text = error instanceof Error ? error.message : String(error);
+    const match = Object.keys(known).find((key) => text.includes(key));
+    return { ok: false, error: match ? known[match] : "Couldn't save. Try again." };
   }
 
   return { ok: true };

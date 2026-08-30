@@ -3,19 +3,24 @@
  *
  *   npm run seed
  *
- * Requires .env.local with NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and
- * JUDGE_CODE_PEPPER. Safe to re-run: it deletes and recreates the `demo-expo` event,
- * which cascades to its posters, judges, assignments and submissions.
+ * Writes to the same embedded database the dev server uses (`.pgdata/`, or wherever
+ * PJ_DATA_DIR points). **PGlite allows one connection at a time, so stop `npm run dev`
+ * or the desktop app before running this** — otherwise it fails to open the directory
+ * rather than corrupting anything.
+ *
+ * Safe to re-run: it deletes and recreates the `demo-expo` event, which cascades to its
+ * posters, judges, assignments and submissions.
  *
  * Codes are shown once here and only ever stored as a peppered hash, exactly as the
  * admin UI does it — so this script is also the quickest way to check that sign-in works
- * end to end.
+ * end to end. The pepper must match the one the server uses (JUDGE_CODE_PEPPER in
+ * .env.local for `npm run dev`; secrets.json in the app's data folder for the packaged
+ * app), or the codes it prints will not be accepted.
  */
-
-import { createClient } from "@supabase/supabase-js";
 
 import { autoAssign, loadPerJudge } from "@/lib/assign";
 import { codeHint, formatCode, generateCode, hashCode } from "@/lib/auth/codes";
+import { getDb, query } from "@/lib/db/client";
 
 const SLUG = "demo-expo";
 const TARGET_JUDGES_PER_POSTER = 3;
@@ -29,11 +34,6 @@ function requireEnv(name: string): string {
   return value;
 }
 
-const db = createClient(
-  requireEnv("NEXT_PUBLIC_SUPABASE_URL"),
-  requireEnv("SUPABASE_SERVICE_ROLE_KEY"),
-  { auth: { persistSession: false, autoRefreshToken: false } },
-);
 const pepper = requireEnv("JUDGE_CODE_PEPPER");
 
 const CRITERIA = [
@@ -69,58 +69,60 @@ const JUDGE_NAMES = [
 async function main() {
   console.log("Seeding demo event...\n");
 
+  // Opening the database also applies any pending migrations, so a fresh checkout can
+  // seed without a separate setup step.
+  await getDb();
+
   // Cascades to posters, judges, criteria, assignments and submissions.
-  await db.from("events").delete().eq("slug", SLUG);
+  await query("delete from events where slug = $1", [SLUG]);
 
-  const { data: event, error: eventError } = await db
-    .from("events")
-    .insert({
-      name: "Demo Research Expo",
-      slug: SLUG,
-      status: "active",
-      target_judges_per_poster: TARGET_JUDGES_PER_POSTER,
-    })
-    .select()
-    .single();
-  if (eventError) throw eventError;
-
-  const { error: criteriaError } = await db.from("criteria").insert(
-    CRITERIA.map((c, i) => ({ ...c, event_id: event.id, sort_order: i })),
+  const [event] = await query<{ id: string; name: string; status: string }>(
+    `insert into events (name, slug, status, target_judges_per_poster)
+     values ($1, $2, 'active', $3)
+     returning id, name, status`,
+    ["Demo Research Expo", SLUG, TARGET_JUDGES_PER_POSTER],
   );
-  if (criteriaError) throw criteriaError;
 
-  const { data: posters, error: posterError } = await db
-    .from("posters")
-    .insert(
-      POSTERS.map((p, i) => ({
-        event_id: event.id,
-        code: `${p.aisle}-${String(i + 1).padStart(2, "0")}`,
-        title: p.title,
-        presenter_names: p.presenters,
-        location: p.aisle,
-      })),
-    )
-    .select();
-  if (posterError) throw posterError;
+  for (const [i, c] of CRITERIA.entries()) {
+    await query(
+      `insert into criteria (event_id, label, description, weight, max_score, sort_order)
+       values ($1, $2, $3, $4, $5, $6)`,
+      [event.id, c.label, c.description, c.weight, c.max_score, i],
+    );
+  }
+
+  const posters: { id: string; code: string; location: string | null }[] = [];
+  for (const [i, p] of POSTERS.entries()) {
+    const [row] = await query<{ id: string; code: string; location: string | null }>(
+      `insert into posters (event_id, code, title, presenter_names, location)
+       values ($1, $2, $3, $4::text[], $5)
+       returning id, code, location`,
+      [
+        event.id,
+        `${p.aisle}-${String(i + 1).padStart(2, "0")}`,
+        p.title,
+        p.presenters,
+        p.aisle,
+      ],
+    );
+    posters.push(row);
+  }
 
   // Generate a code per judge, keep the plaintext in memory only long enough to print it.
   const plaintext = new Map<string, string>();
-  const judgeRows = JUDGE_NAMES.map((name) => {
+  const judges: { id: string; name: string }[] = [];
+
+  for (const name of JUDGE_NAMES) {
     const code = generateCode();
     plaintext.set(name, code);
-    return {
-      event_id: event.id,
-      name,
-      code_hash: hashCode(code, pepper),
-      code_hint: codeHint(code),
-    };
-  });
-
-  const { data: judges, error: judgeError } = await db
-    .from("judges")
-    .insert(judgeRows)
-    .select();
-  if (judgeError) throw judgeError;
+    const [row] = await query<{ id: string; name: string }>(
+      `insert into judges (event_id, name, code_hash, code_hint)
+       values ($1, $2, $3, $4)
+       returning id, name`,
+      [event.id, name, hashCode(code, pepper), codeHint(code)],
+    );
+    judges.push(row);
+  }
 
   const plan = autoAssign(
     posters.map((p) => ({ id: p.id, code: p.code, location: p.location })),
@@ -128,18 +130,15 @@ async function main() {
     TARGET_JUDGES_PER_POSTER,
   );
 
-  const { error: assignError } = await db.from("assignments").insert(
-    plan.map((a) => ({
-      event_id: event.id,
-      judge_id: a.judgeId,
-      poster_id: a.posterId,
-      sort_order: a.sortOrder,
-    })),
-  );
-  if (assignError) throw assignError;
+  for (const a of plan) {
+    await query(
+      `insert into assignments (event_id, judge_id, poster_id, sort_order)
+       values ($1, $2, $3, $4)`,
+      [event.id, a.judgeId, a.posterId, a.sortOrder],
+    );
+  }
 
   const loads = loadPerJudge(plan);
-  const byId = new Map(judges.map((j) => [j.id, j.name]));
 
   console.log(`Event      ${event.name} (${event.status})`);
   console.log(`Posters    ${posters.length}`);
@@ -151,14 +150,16 @@ async function main() {
     const code = plaintext.get(judge.name)!;
     const load = loads.get(judge.id) ?? 0;
     console.log(
-      `  ${formatCode(code)}   ${byId.get(judge.id)!.padEnd(22)} ${load} posters`,
+      `  ${formatCode(code)}   ${judge.name.padEnd(22)} ${load} posters`,
     );
   }
 
-  console.log("\nSign in at http://localhost:3000 with any code above.");
+  console.log("\nStart the app and sign in with any code above.");
 }
 
-main().catch((error) => {
-  console.error("\nSeed failed:", error.message ?? error);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error("\nSeed failed:", error?.message ?? error);
+    process.exit(1);
+  });

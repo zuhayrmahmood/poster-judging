@@ -1,6 +1,5 @@
 import Link from "next/link";
 
-import { adminSignOut } from "@/app/actions/admin";
 import { requireAdmin } from "@/lib/auth/admin";
 import { getPrimaryEvent } from "@/lib/data/admin";
 
@@ -11,6 +10,7 @@ const TABS = [
   { href: "/admin/rubric", label: "Rubric" },
   { href: "/admin/assignments", label: "Assignments" },
   { href: "/admin/settings", label: "Settings" },
+  { href: "/admin/connect", label: "Connect" },
 ] as const;
 
 const STATUS_STYLE: Record<string, string> = {
@@ -33,7 +33,7 @@ export default async function AdminLayout({ children }: LayoutProps<"/admin">) {
             <p className="truncate text-sm font-semibold">
               {event?.name ?? "No event yet"}
             </p>
-            <p className="truncate text-xs text-muted">{admin.email}</p>
+            <p className="truncate text-xs text-muted">{admin.label}</p>
           </div>
 
           {event ? (
@@ -50,14 +50,8 @@ export default async function AdminLayout({ children }: LayoutProps<"/admin">) {
             </span>
           ) : null}
 
-          <form action={adminSignOut}>
-            <button
-              type="submit"
-              className="rounded-lg px-2.5 py-2 text-xs font-medium text-muted hover:text-ink"
-            >
-              Sign out
-            </button>
-          </form>
+          {/* No sign-out: admin access is this desktop window holding a token the
+              Electron shell issued at launch, not a session that can be ended. */}
         </div>
 
         <nav className="mx-auto w-full max-w-6xl overflow-x-auto px-5">
