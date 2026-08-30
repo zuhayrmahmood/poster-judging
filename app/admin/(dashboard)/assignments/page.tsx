@@ -5,7 +5,7 @@ import {
 import { autoAssign, loadPerJudge } from "@/lib/assign";
 import { requireAdmin } from "@/lib/auth/admin";
 import { getPosters, getPrimaryEvent } from "@/lib/data/admin";
-import { db } from "@/lib/supabase/admin";
+import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -21,18 +21,17 @@ export default async function AssignmentsPage() {
     );
   }
 
-  const [posters, { data: judges }, { data: existing }] = await Promise.all([
+  const [posters, activeJudges, existing] = await Promise.all([
     getPosters(event.id),
-    db()
-      .from("judges")
-      .select("id, name")
-      .eq("event_id", event.id)
-      .eq("active", true)
-      .order("name"),
-    db().from("assignments").select("judge_id").eq("event_id", event.id),
+    query<{ id: string; name: string }>(
+      "select id, name from judges where event_id = $1 and active order by name",
+      [event.id],
+    ),
+    query<{ judge_id: string }>(
+      "select judge_id from assignments where event_id = $1",
+      [event.id],
+    ),
   ]);
-
-  const activeJudges = judges ?? [];
 
   // The preview is computed with the same pure function the commit action uses, and
   // autoAssign is deterministic — so what is shown here is exactly what gets saved.
@@ -44,7 +43,7 @@ export default async function AssignmentsPage() {
   const proposed = loadPerJudge(plan);
 
   const current = new Map<string, number>();
-  for (const row of existing ?? []) {
+  for (const row of existing) {
     current.set(row.judge_id, (current.get(row.judge_id) ?? 0) + 1);
   }
 

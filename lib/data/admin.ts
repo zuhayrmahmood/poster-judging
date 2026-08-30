@@ -1,6 +1,6 @@
 import "server-only";
 
-import { db } from "@/lib/supabase/admin";
+import { num, numOr, one, query } from "@/lib/db";
 import type {
   Criterion,
   Event,
@@ -13,32 +13,31 @@ import type {
  * Admin reads. Callers must have passed `requireAdmin()` first — nothing here checks.
  */
 
+const JUDGE_COLUMNS = "id, event_id, name, email, code_hint, active, created_at";
+
 /**
  * The event the dashboard shows. The schema is multi-event, but the UI assumes one at a
  * time: prefer the active one, else the most recently created.
  */
 export async function getPrimaryEvent(): Promise<Event | null> {
-  const { data: active } = await db()
-    .from("events")
-    .select("*")
-    .eq("status", "active")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (active) return active;
-
-  const { data: latest } = await db()
-    .from("events")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  return latest;
+  return one<Event>(
+    `select * from events
+      order by (status = 'active') desc, created_at desc
+      limit 1`,
+  );
 }
 
 export type RankedResult = PosterResult & { rank: number };
+
+/** `numeric` columns arrive as strings; the ranking below sorts on them. */
+function toResult(row: PosterResult): PosterResult {
+  return {
+    ...row,
+    n_judges: numOr(row.n_judges),
+    raw_pct: num(row.raw_pct),
+    norm_z: num(row.norm_z),
+  };
+}
 
 /**
  * Poster results, ranked. Sorting happens here rather than in SQL so the dashboard can
@@ -51,12 +50,12 @@ export async function getResults(
   eventId: string,
   mode: "raw" | "normalized" = "raw",
 ): Promise<RankedResult[]> {
-  const { data } = await db()
-    .from("v_poster_results")
-    .select("*")
-    .eq("event_id", eventId);
+  const rows = (
+    await query<PosterResult>("select * from v_poster_results where event_id = $1", [
+      eventId,
+    ])
+  ).map(toResult);
 
-  const rows = (data ?? []) as PosterResult[];
   const key = mode === "raw" ? "raw_pct" : "norm_z";
 
   const sorted = [...rows].sort((a, b) => {
@@ -82,41 +81,39 @@ export type JudgeProgress = {
 };
 
 export async function getJudgeProgress(eventId: string): Promise<JudgeProgress[]> {
-  const { data } = await db()
-    .from("v_judge_progress")
-    .select("*")
-    .eq("event_id", eventId)
-    .order("name");
-  return (data ?? []) as JudgeProgress[];
+  const rows = await query<JudgeProgress>(
+    "select * from v_judge_progress where event_id = $1 order by name",
+    [eventId],
+  );
+  // `count(...)` is bigint, which is not safely a JS number in general — at this scale
+  // it always is, but coerce rather than leave the type a lie.
+  return rows.map((row) => ({
+    ...row,
+    assigned: numOr(row.assigned),
+    submitted: numOr(row.submitted),
+  }));
 }
 
 export async function getPosters(eventId: string): Promise<Poster[]> {
-  const { data } = await db()
-    .from("posters")
-    .select("*")
-    .eq("event_id", eventId)
-    .order("location")
-    .order("code");
-  return data ?? [];
+  return query<Poster>(
+    "select * from posters where event_id = $1 order by location, code",
+    [eventId],
+  );
 }
 
 export async function getJudges(eventId: string): Promise<Judge[]> {
-  const { data } = await db()
-    .from("judges")
-    .select("id, event_id, name, email, code_hint, active, created_at")
-    .eq("event_id", eventId)
-    .order("name");
-  return data ?? [];
+  return query<Judge>(
+    `select ${JUDGE_COLUMNS} from judges where event_id = $1 order by name`,
+    [eventId],
+  );
 }
 
 export async function getCriteria(eventId: string): Promise<Criterion[]> {
-  const { data } = await db()
-    .from("criteria")
-    .select("*")
-    .eq("event_id", eventId)
-    .order("sort_order")
-    .order("label");
-  return data ?? [];
+  const rows = await query<Criterion>(
+    "select * from criteria where event_id = $1 order by sort_order, label",
+    [eventId],
+  );
+  return rows.map((row) => ({ ...row, weight: numOr(row.weight) }));
 }
 
 export type PosterSheet = {
@@ -130,49 +127,48 @@ export type PosterSheet = {
 
 /** Every judge's sheet for one poster, for the drill-down view. */
 export async function getPosterSheets(posterId: string): Promise<PosterSheet[]> {
-  const { data: submissions } = await db()
-    .from("submissions")
-    .select("id, judge_id, comment, submitted_at, judges(name)")
-    .eq("poster_id", posterId)
-    .eq("status", "submitted");
+  type Row = {
+    submission_id: string;
+    judge_id: string;
+    judge_name: string | null;
+    comment: string | null;
+    submitted_at: string | null;
+    pct: string | null;
+    // Aggregated in SQL rather than fetched as a second query and stitched in JS.
+    scores: Record<string, number> | null;
+  };
 
-  if (!submissions || submissions.length === 0) return [];
-
-  const ids = submissions.map((s) => s.id);
-
-  const [{ data: scoreRows }, { data: totals }] = await Promise.all([
-    db().from("submission_scores").select("*").in("submission_id", ids),
-    db().from("v_submission_totals").select("submission_id, pct").in("submission_id", ids),
-  ]);
-
-  const pctBySubmission = new Map(
-    (totals ?? []).map((t) => [t.submission_id, Number(t.pct)] as const),
+  const rows = await query<Row>(
+    `select s.id          as submission_id,
+            s.judge_id,
+            j.name        as judge_name,
+            s.comment,
+            s.submitted_at,
+            t.pct,
+            (select jsonb_object_agg(ss.criterion_id, ss.value)
+               from submission_scores ss
+              where ss.submission_id = s.id) as scores
+       from submissions s
+       join judges j on j.id = s.judge_id
+       left join v_submission_totals t on t.submission_id = s.id
+      where s.poster_id = $1
+        and s.status = 'submitted'
+      order by j.name`,
+    [posterId],
   );
 
-  return submissions
-    .map((submission) => {
-      const judge = Array.isArray(submission.judges)
-        ? submission.judges[0]
-        : submission.judges;
-
-      const scores: Record<string, number> = {};
-      for (const row of scoreRows ?? []) {
-        if (row.submission_id === submission.id) scores[row.criterion_id] = row.value;
-      }
-
-      return {
-        judgeId: submission.judge_id,
-        judgeName: (judge as { name?: string } | null)?.name ?? "Unknown judge",
-        pct: pctBySubmission.get(submission.id) ?? null,
-        comment: submission.comment,
-        submittedAt: submission.submitted_at,
-        scores,
-      };
-    })
-    .sort((a, b) => a.judgeName.localeCompare(b.judgeName));
+  return rows.map((row) => ({
+    judgeId: row.judge_id,
+    judgeName: row.judge_name ?? "Unknown judge",
+    pct: num(row.pct),
+    comment: row.comment,
+    submittedAt: row.submitted_at,
+    scores: Object.fromEntries(
+      Object.entries(row.scores ?? {}).map(([id, value]) => [id, Number(value)]),
+    ),
+  }));
 }
 
 export async function getPoster(posterId: string): Promise<Poster | null> {
-  const { data } = await db().from("posters").select("*").eq("id", posterId).single();
-  return data;
+  return one<Poster>("select * from posters where id = $1", [posterId]);
 }

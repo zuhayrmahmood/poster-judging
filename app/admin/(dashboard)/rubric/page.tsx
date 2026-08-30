@@ -1,7 +1,7 @@
 import { RubricManager } from "@/components/admin/rubric-manager";
 import { requireAdmin } from "@/lib/auth/admin";
 import { getCriteria, getPrimaryEvent } from "@/lib/data/admin";
-import { db } from "@/lib/supabase/admin";
+import { one } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -17,14 +17,16 @@ export default async function RubricPage() {
     );
   }
 
-  const [criteria, { count }] = await Promise.all([
+  const [criteria, submitted] = await Promise.all([
     getCriteria(event.id),
-    db()
-      .from("submissions")
-      .select("id", { count: "exact", head: true })
-      .eq("event_id", event.id)
-      .eq("status", "submitted"),
+    one<{ count: number }>(
+      `select count(*)::int as count from submissions
+        where event_id = $1 and status = 'submitted'`,
+      [event.id],
+    ),
   ]);
+
+  const count = submitted?.count ?? 0;
 
   return (
     <RubricManager

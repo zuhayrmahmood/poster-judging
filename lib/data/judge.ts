@@ -1,6 +1,6 @@
 import "server-only";
 
-import { db } from "@/lib/supabase/admin";
+import { num, one, query } from "@/lib/db";
 import type {
   AssignmentRow,
   Criterion,
@@ -12,71 +12,58 @@ import type {
 
 /** Read helpers for the judge-facing pages. Every caller must already hold a session. */
 
+const JUDGE_COLUMNS = "id, event_id, name, email, code_hint, active, created_at";
+
 export async function getEvent(eventId: string): Promise<Event | null> {
-  const { data } = await db().from("events").select("*").eq("id", eventId).single();
-  return data;
+  return one<Event>("select * from events where id = $1", [eventId]);
 }
 
 export async function getJudge(judgeId: string): Promise<Judge | null> {
-  const { data } = await db()
-    .from("judges")
-    .select("id, event_id, name, email, code_hint, active, created_at")
-    .eq("id", judgeId)
-    .single();
-  return data;
+  return one<Judge>(`select ${JUDGE_COLUMNS} from judges where id = $1`, [judgeId]);
 }
 
 export async function getCriteria(eventId: string): Promise<Criterion[]> {
-  const { data } = await db()
-    .from("criteria")
-    .select("*")
-    .eq("event_id", eventId)
-    .order("sort_order")
-    .order("label");
-  return data ?? [];
+  const rows = await query<Criterion>(
+    "select * from criteria where event_id = $1 order by sort_order, label",
+    [eventId],
+  );
+  // `weight` is numeric, so it arrives as a string; the scoring math would concatenate
+  // rather than add if it stayed that way.
+  return rows.map((row) => ({ ...row, weight: num(row.weight) ?? 0 }));
 }
 
 /**
  * The judge's list, in walking order, annotated with what they have already done.
  *
- * Two queries rather than one join: the submission for a poster may not exist, and
- * merging in JS keeps the "not_started" case explicit instead of leaning on a null from
- * an outer join.
+ * A left join rather than two queries: with the poster row and the submission state in
+ * one result, "not_started" is just a null status, and the walking order comes straight
+ * from the index on (judge_id, sort_order).
  */
 export async function getAssignmentRows(judgeId: string): Promise<AssignmentRow[]> {
-  const { data: assignments } = await db()
-    .from("assignments")
-    .select("sort_order, poster:posters(*)")
-    .eq("judge_id", judgeId)
-    .order("sort_order");
+  type Row = Poster & {
+    submission_status: AssignmentRow["status"] | null;
+    submission_updated_at: string | null;
+  };
 
-  if (!assignments) return [];
-
-  const { data: submissions } = await db()
-    .from("submissions")
-    .select("poster_id, status, updated_at")
-    .eq("judge_id", judgeId);
-
-  const byPoster = new Map(
-    (submissions ?? []).map((s) => [s.poster_id, s] as const),
+  const rows = await query<Row>(
+    `select p.*,
+            s.status     as submission_status,
+            s.updated_at as submission_updated_at
+       from assignments a
+       join posters p on p.id = a.poster_id
+       left join submissions s
+              on s.poster_id = a.poster_id
+             and s.judge_id  = a.judge_id
+      where a.judge_id = $1
+      order by a.sort_order`,
+    [judgeId],
   );
 
-  return assignments.flatMap((row) => {
-    // Supabase types an embedded to-one relation as an array; unwrap it.
-    const poster = (Array.isArray(row.poster) ? row.poster[0] : row.poster) as
-      | Poster
-      | undefined;
-    if (!poster) return [];
-
-    const submission = byPoster.get(poster.id);
-    return [
-      {
-        poster,
-        status: submission?.status ?? "not_started",
-        updated_at: submission?.updated_at ?? null,
-      } satisfies AssignmentRow,
-    ];
-  });
+  return rows.map(({ submission_status, submission_updated_at, ...poster }) => ({
+    poster,
+    status: submission_status ?? "not_started",
+    updated_at: submission_updated_at,
+  }));
 }
 
 /**
@@ -87,13 +74,10 @@ export async function getPosterInEvent(
   posterId: string,
   eventId: string,
 ): Promise<Poster | null> {
-  const { data } = await db()
-    .from("posters")
-    .select("*")
-    .eq("id", posterId)
-    .eq("event_id", eventId)
-    .single();
-  return data;
+  return one<Poster>(
+    "select * from posters where id = $1 and event_id = $2",
+    [posterId, eventId],
+  );
 }
 
 export type SubmissionWithScores = {
@@ -105,22 +89,19 @@ export async function getSubmission(
   judgeId: string,
   posterId: string,
 ): Promise<SubmissionWithScores | null> {
-  const { data: submission } = await db()
-    .from("submissions")
-    .select("*")
-    .eq("judge_id", judgeId)
-    .eq("poster_id", posterId)
-    .maybeSingle();
-
+  const submission = await one<Submission>(
+    "select * from submissions where judge_id = $1 and poster_id = $2",
+    [judgeId, posterId],
+  );
   if (!submission) return null;
 
-  const { data: rows } = await db()
-    .from("submission_scores")
-    .select("criterion_id, value")
-    .eq("submission_id", submission.id);
+  const rows = await query<{ criterion_id: string; value: number }>(
+    "select criterion_id, value from submission_scores where submission_id = $1",
+    [submission.id],
+  );
 
   const scores: Record<string, number> = {};
-  for (const row of rows ?? []) scores[row.criterion_id] = row.value;
+  for (const row of rows) scores[row.criterion_id] = Number(row.value);
 
   return { submission, scores };
 }
@@ -131,20 +112,28 @@ export async function getSubmission(
  */
 export async function searchPosters(
   eventId: string,
-  query: string,
+  term: string,
 ): Promise<Poster[]> {
-  const trimmed = query.trim();
-  let request = db().from("posters").select("*").eq("event_id", eventId);
+  const trimmed = term.trim();
 
-  if (trimmed) {
-    // Escape PostgREST's `or` delimiters so a comma or paren in the query cannot
-    // change the filter's structure.
-    const safe = trimmed.replace(/[(),]/g, " ");
-    request = request.or(`code.ilike.%${safe}%,title.ilike.%${safe}%`);
+  if (!trimmed) {
+    return query<Poster>(
+      "select * from posters where event_id = $1 order by location, code limit 50",
+      [eventId],
+    );
   }
 
-  const { data } = await request.order("location").order("code").limit(50);
-  return data ?? [];
+  // The term is a bound parameter, so `%` and `_` are the only characters with meaning
+  // and they only ever widen the match. No escaping dance is needed here — unlike the
+  // PostgREST `or=` filter this replaces, where a comma changed the filter's structure.
+  return query<Poster>(
+    `select * from posters
+      where event_id = $1
+        and (code ilike $2 or title ilike $2)
+      order by location, code
+      limit 50`,
+    [eventId, `%${trimmed}%`],
+  );
 }
 
 /** Progress counter for the assignment list header. */

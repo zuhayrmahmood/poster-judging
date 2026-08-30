@@ -67,7 +67,10 @@ export async function setJudgeCookie(token: string): Promise<void> {
   const store = await cookies();
   store.set(JUDGE_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    // Always false: the app is served over plain HTTP on the venue LAN, never HTTPS.
+    // Keying this off NODE_ENV (as the Vercel build did) would make every phone in a
+    // packaged build silently discard the cookie, so no judge could stay signed in.
+    secure: false,
     sameSite: "lax",
     path: "/",
     maxAge: SESSION_TTL_SECONDS,
