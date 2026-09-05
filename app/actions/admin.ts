@@ -1,18 +1,26 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 import { autoAssign } from "@/lib/assign";
 import { requireAdmin } from "@/lib/auth/admin";
 import { codeHint, generateCode, hashCode } from "@/lib/auth/codes";
 import { one, query, transaction } from "@/lib/db";
 import { env } from "@/lib/env";
+import { createServerSupabase } from "@/lib/supabase/server";
 import type { EventStatus } from "@/lib/types";
 
 /**
  * Every action re-checks admin membership. Server Actions are reachable by direct POST,
  * so proxy.ts having redirected the browser proves nothing.
  */
+
+export async function adminSignOut() {
+  const supabase = await createServerSupabase();
+  await supabase.auth.signOut();
+  redirect("/admin/login");
+}
 
 // ---------------------------------------------------------------------------
 // Event

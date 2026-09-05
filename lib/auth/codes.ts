@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
  * in by the caller. That keeps these functions unit-testable and importable from
  * standalone Node scripts (scripts/seed.ts) — `server-only` resolves to a module that
  * throws outside a react-server context, which would break both. The secrets stay
- * guarded where they actually live, in lib/env.ts and lib/supabase/admin.ts.
+ * guarded where they actually live, in lib/env.ts and lib/db/index.ts.
  */
 
 /**

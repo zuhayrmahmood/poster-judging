@@ -1,140 +1,115 @@
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
-
-import { PGlite } from "@electric-sql/pglite";
+import { Pool, type PoolClient } from "pg";
 
 /**
- * The embedded database.
+ * The database connection.
  *
- * PGlite is Postgres compiled to WASM, running inside this process against a directory
- * on disk. It replaces the hosted Supabase project: there is no network, no anon key
- * and no PostgREST surface, which is why db/migrations/0001_init.sql no longer carries
- * the RLS lockdown that guarded those.
+ * Supabase Postgres, reached over a plain connection string rather than through
+ * PostgREST. Every read and write in this app is hand-written SQL (see lib/data/*.ts),
+ * so the JS client would only have been a second dialect to translate into and out of.
  *
- * **PGlite is single-connection.** Exactly one process may hold the data directory, so
- * the Next.js server owns it and Electron's main process never opens it directly. A
- * second opener (a stray `npm run seed` against a running app) will fail rather than
- * corrupt anything, which is the failure mode we want.
+ * Two things about `DATABASE_URL` that are easy to get wrong and expensive to discover
+ * on event day:
  *
- * Deliberately *not* `server-only`: scripts/seed.ts is a plain Node script and
- * `server-only` throws outside a react-server context. Application code should import
- * `@/lib/db` instead, which adds that guard — same split, and for the same reason, as
- * lib/auth/codes.ts.
+ *   * **Use the transaction pooler (port 6543), not the direct connection (5432).**
+ *     Each serverless instance opens its own pool, and a hall of judges hitting cold
+ *     starts will exhaust a direct connection limit long before it troubles the pooler.
+ *   * **No prepared statements.** Transaction-mode pooling hands each statement to
+ *     whichever backend is free, so a statement prepared on one is missing on the next.
+ *     `pg` only prepares when a query is given a `name`, and nothing here does — keep
+ *     it that way.
+ *
+ * Deliberately *not* `server-only`: scripts/seed.ts and scripts/migrate.ts are plain
+ * Node scripts and `server-only` throws outside a react-server context. Application
+ * code should import `@/lib/db` instead, which adds that guard — same split, and for
+ * the same reason, as lib/auth/codes.ts.
  */
 
-const MIGRATIONS_TABLE = `
-  create table if not exists schema_migrations (
-    name       text primary key,
-    applied_at timestamptz not null default now()
-  )
-`;
+let pool: Pool | null = null;
 
-function dataDir(): string {
-  // Electron sets this to <userData>/pgdata. In dev it falls back to a gitignored
-  // directory in the repo, so `npm run dev` needs no configuration at all.
-  return process.env.PJ_DATA_DIR ?? path.join(process.cwd(), ".pgdata");
-}
+export function getPool(): Pool {
+  if (!pool) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error(
+        "Missing DATABASE_URL. Copy .env.example to .env.local and paste the " +
+          "Supabase connection pooler URI (Project Settings -> Database).",
+      );
+    }
 
-function migrationsDir(): string {
-  // Overridden in the packaged app, where db/ is copied next to the standalone server.
-  return (
-    process.env.PJ_MIGRATIONS_DIR ?? path.join(process.cwd(), "db", "migrations")
-  );
-}
+    pool = new Pool({
+      connectionString,
+      // Small on purpose. The work per request is a handful of short queries, and many
+      // small pools across serverless instances add up faster than one large one.
+      max: 5,
+      // Return connections to the pooler quickly; instances are short-lived.
+      idleTimeoutMillis: 10_000,
+      // Fail fast rather than hanging a judge's submit on a network problem.
+      connectionTimeoutMillis: 10_000,
+    });
 
-/**
- * Applies any migration not yet recorded, in filename order.
- *
- * This replaces pasting SQL into the Supabase editor by hand — a desktop app cannot ask
- * the organiser to do that. Each file runs inside a transaction with its bookkeeping
- * row, so a failure part-way leaves the database on the previous migration rather than
- * half-way through this one.
- */
-async function migrate(db: PGlite): Promise<void> {
-  await db.exec(MIGRATIONS_TABLE);
-
-  const applied = new Set(
-    (
-      await db.query<{ name: string }>("select name from schema_migrations")
-    ).rows.map((row) => row.name),
-  );
-
-  const dir = migrationsDir();
-  const pending = readdirSync(dir)
-    .filter((file) => file.endsWith(".sql"))
-    .sort()
-    .filter((file) => !applied.has(file));
-
-  for (const file of pending) {
-    const sql = readFileSync(path.join(dir, file), "utf8");
-    await db.transaction(async (tx) => {
-      await tx.exec(sql);
-      await tx.query("insert into schema_migrations (name) values ($1)", [file]);
+    // A backend killed by the pooler or by a Supabase restart surfaces as an error on
+    // an idle client. Without a listener, `pg` promotes that to an uncaught exception
+    // and takes the whole server process down with it.
+    pool.on("error", (error) => {
+      console.error("Idle database client error:", error);
     });
   }
-}
-
-let instance: Promise<PGlite> | null = null;
-
-/**
- * The process-wide database handle, migrated and ready.
- *
- * Cached as the *promise* rather than the resolved client so that concurrent first
- * callers — which is exactly what happens when several judges hit a cold server at once
- * — share one boot and one migration run instead of racing.
- */
-export function getDb(): Promise<PGlite> {
-  if (!instance) {
-    instance = (async () => {
-      const db = new PGlite(dataDir());
-      await db.waitReady;
-      await migrate(db);
-      return db;
-    })().catch((error) => {
-      // Do not cache a failed boot: a bad migration should be retryable after a fix
-      // without restarting the whole app.
-      instance = null;
-      throw error;
-    });
-  }
-  return instance;
+  return pool;
 }
 
 /** Rows from a parameterized query. Always use `$1` placeholders, never interpolation. */
-export async function query<T>(
-  sql: string,
-  params: unknown[] = [],
-): Promise<T[]> {
-  const db = await getDb();
-  const { rows } = await db.query<T>(sql, params);
-  return rows;
+export async function query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  const result = await getPool().query(sql, params);
+  return result.rows as T[];
 }
 
 /** First row, or null. The query should constrain itself to one row. */
-export async function one<T>(
-  sql: string,
-  params: unknown[] = [],
-): Promise<T | null> {
+export async function one<T>(sql: string, params: unknown[] = []): Promise<T | null> {
   const rows = await query<T>(sql, params);
   return rows[0] ?? null;
 }
 
-/** Runs `fn` in a transaction, rolling back if it throws. */
+/**
+ * Runs `fn` in a transaction, rolling back if it throws.
+ *
+ * Takes a dedicated client for the duration: pooled queries are handed out per
+ * statement, so a BEGIN issued through the pool would not necessarily reach the same
+ * backend as the statements after it.
+ */
 export async function transaction<T>(
   fn: (tx: {
     query<R>(sql: string, params?: unknown[]): Promise<R[]>;
   }) => Promise<T>,
 ): Promise<T> {
-  const db = await getDb();
-  const result = await db.transaction(async (tx) => {
-    return fn({
+  const client: PoolClient = await getPool().connect();
+
+  try {
+    await client.query("begin");
+    const result = await fn({
       async query<R>(sql: string, params: unknown[] = []): Promise<R[]> {
-        const { rows } = await tx.query<R>(sql, params);
-        return rows;
+        const rows = await client.query(sql, params);
+        return rows.rows as R[];
       },
     });
-  });
-  return result as T;
+    await client.query("commit");
+    return result;
+  } catch (error) {
+    // Best-effort: if the connection itself is what failed, the rollback fails too and
+    // the original error is the one worth reporting.
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/** Closes the pool. Only for scripts — the server keeps its pool for its whole life. */
+export async function closePool(): Promise<void> {
+  if (pool) {
+    const closing = pool;
+    pool = null;
+    await closing.end();
+  }
 }
 
 /**

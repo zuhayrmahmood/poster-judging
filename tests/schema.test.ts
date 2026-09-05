@@ -7,7 +7,7 @@ import { judgeStats, mean, roundTo, weightedPct, zScore } from "@/lib/scoring";
 import type { Criterion } from "@/lib/types";
 
 /**
- * Pins db/migrations/0002_views.sql to lib/scoring.ts.
+ * Pins supabase/migrations/0002_views.sql to lib/scoring.ts.
  *
  * The judge UI previews a total with the TypeScript in lib/scoring.ts; the dashboard
  * reads the SQL views. Nothing but this test stops the two from silently disagreeing.
@@ -19,7 +19,15 @@ import type { Criterion } from "@/lib/types";
  * a replayed submission must overwrite rather than double-count.
  */
 
-const MIGRATIONS = ["0001_init", "0002_views", "0003_save_submission"];
+// 0004 is deliberately absent: it needs Supabase's `auth` schema and its anon /
+// authenticated roles, neither of which exists here. Every other migration is portable
+// and belongs in this list, so the fixture keeps matching the real schema.
+const MIGRATIONS = [
+  "0001_init",
+  "0002_views",
+  "0003_save_submission",
+  "0005_login_attempts_by_code",
+];
 
 const RUBRIC: Array<{ label: string; weight: number; max: number }> = [
   { label: "research", weight: 30, max: 5 },
@@ -50,7 +58,7 @@ let eventId: string;
 before(async () => {
   db = new PGlite();
   for (const name of MIGRATIONS) {
-    await db.exec(readFileSync(`db/migrations/${name}.sql`, "utf8"));
+    await db.exec(readFileSync(`supabase/migrations/${name}.sql`, "utf8"));
   }
 
   const ev = await db.query<{ id: string }>(
