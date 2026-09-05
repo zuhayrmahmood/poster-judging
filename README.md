@@ -15,23 +15,14 @@ Next.js 16 (App Router) · React 19 · Tailwind 4 · Supabase Postgres · deploy
 
 ### 1. Create a Supabase project
 
-Any region; the free tier is plenty. From **Project Settings → API** you need the project
-URL, the `anon` key, and the `service_role` key.
+Any region; the free tier is plenty. You need two things from it:
 
-### 2. Run the migrations
+- **Project Settings → Database → Connection string** — the connection pooler URI. The
+  app talks to Postgres directly; this is its only route to your data.
+- **Project Settings → API** — the project URL and the `anon` key, used only to sign
+  organisers in.
 
-Paste each file into the Supabase **SQL Editor** and run them in order:
-
-```
-supabase/migrations/0001_init.sql          tables, RLS lockdown, login throttling
-supabase/migrations/0002_views.sql         aggregation views
-supabase/migrations/0003_save_submission.sql  atomic score save
-```
-
-Requires Postgres 15+ for `security_invoker` views — every current Supabase project
-qualifies.
-
-### 3. Configure the environment
+### 2. Configure the environment
 
 ```bash
 cp .env.example .env.local
@@ -39,8 +30,45 @@ openssl rand -base64 48   # -> JUDGE_SESSION_SECRET
 openssl rand -base64 32   # -> JUDGE_CODE_PEPPER
 ```
 
+Use the **transaction pooler** URI (port 6543) for `DATABASE_URL`. Each serverless
+instance opens its own pool, and the direct connection limit will not survive a hall of
+judges arriving at once.
+
 `JUDGE_CODE_PEPPER` is mixed into every access-code hash. **Changing it invalidates
 every code that has been issued**, so set it once and leave it alone.
+
+### 3. Run the migrations
+
+```bash
+npm run migrate
+```
+
+Applies anything in `supabase/migrations/` that has not been applied yet, tracked in a
+`schema_migrations` table, each file in its own transaction. Re-running is a no-op.
+
+Point `DATABASE_URL` at the **direct** connection (port 5432) for this one command —
+DDL in a single transaction is what transaction-mode pooling is worst at.
+
+```
+0001_init.sql                    tables, RLS lockdown, login throttling
+0002_views.sql                   aggregation views
+0003_save_submission.sql         atomic score save
+0004_supabase_auth.sql           admins table, privilege revokes
+0005_login_attempts_by_code.sql  re-key throttling from IP to code
+```
+
+**Upgrading a project that predates this runner?** It has the schema but no bookkeeping
+table, so migrate would try to create tables that already exist. Record the ones it
+already has, once:
+
+```bash
+npm run migrate -- --baseline 0004_supabase_auth.sql
+npm run migrate
+```
+
+Requires Postgres 15+ for `security_invoker` views — every current Supabase project
+qualifies.
+
 
 ### 4. Create an organiser account
 
@@ -115,8 +143,9 @@ two cannot drift apart silently.
 
 Every table is RLS-enabled with **no policies**, which denies the `anon` and
 `authenticated` roles outright, and table privileges are revoked from both. All reads and
-writes go through server code using the service-role key, after that code has checked
-authorization itself. A leaked anon key therefore exposes nothing.
+writes go through server code over a direct Postgres connection, as the role that owns
+the tables and therefore bypasses RLS, after that code has checked authorization itself.
+A leaked anon key therefore exposes nothing — it can sign a user in and nothing more.
 
 Consequences worth knowing:
 
@@ -129,7 +158,8 @@ Consequences worth knowing:
 Access codes are 8 characters of Crockford base32 minus `0`/`1` (~39 bits), stored as a
 peppered SHA-256. A fast hash is correct here — the code is uniformly random, so there is
 no dictionary to attack, and an indexed hash gives O(1) lookup. Online guessing is capped
-at 10 failures per IP per 15 minutes.
+at 10 failures per *code* per 15 minutes — keyed on the code rather than the client IP,
+because a hall of judges on venue wifi shares one IP and would throttle each other.
 
 Judges may score **any poster in their own event**, not only assigned ones. The
 assignment list is a suggested walking order, and a judge who wanders to a neighbouring
@@ -151,7 +181,8 @@ Poster halls have bad wifi, so the scoring form assumes it will lose the network
 ```bash
 npm run dev     # dev server
 npm run build   # production build
-npm test        # unit tests (scoring, access codes, assignment)
+npm test        # unit tests (scoring, access codes, assignment, SQL views)
+npm run migrate # apply pending migrations
 npm run seed    # reset and reseed the demo event
 npm run lint
 ```

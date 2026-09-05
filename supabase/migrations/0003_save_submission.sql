@@ -4,8 +4,8 @@
 -- the submission row and its child scores can never be left half-written, and the
 -- authorization invariants live next to the data they protect.
 --
--- Called only by the service role (see 0001 — RLS denies anon/authenticated outright),
--- so this is not a privilege boundary on its own. The server action checks the judge's
+-- Not a privilege boundary on its own: 0001 denies anon and authenticated outright, so
+-- the only caller is the app's own connection. The server action checks the judge's
 -- session cookie first; these checks are the second line.
 
 create or replace function save_submission(
@@ -89,6 +89,3 @@ begin
   return v_submission_id;
 end;
 $$;
-
-revoke all on function save_submission(uuid, uuid, submission_status, text, jsonb)
-  from anon, authenticated;

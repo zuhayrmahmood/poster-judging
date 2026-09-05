@@ -3,24 +3,21 @@
  *
  *   npm run seed
  *
- * Writes to the same embedded database the dev server uses (`.pgdata/`, or wherever
- * PJ_DATA_DIR points). **PGlite allows one connection at a time, so stop `npm run dev`
- * or the desktop app before running this** — otherwise it fails to open the directory
- * rather than corrupting anything.
+ * Writes to the database DATABASE_URL points at, so make sure that is the project you
+ * mean before running it against anything but a scratch one.
  *
  * Safe to re-run: it deletes and recreates the `demo-expo` event, which cascades to its
  * posters, judges, assignments and submissions.
  *
  * Codes are shown once here and only ever stored as a peppered hash, exactly as the
  * admin UI does it — so this script is also the quickest way to check that sign-in works
- * end to end. The pepper must match the one the server uses (JUDGE_CODE_PEPPER in
- * .env.local for `npm run dev`; secrets.json in the app's data folder for the packaged
- * app), or the codes it prints will not be accepted.
+ * end to end. The pepper must match the one the server uses (JUDGE_CODE_PEPPER), or the
+ * codes it prints will not be accepted.
  */
 
 import { autoAssign, loadPerJudge } from "@/lib/assign";
 import { codeHint, formatCode, generateCode, hashCode } from "@/lib/auth/codes";
-import { getDb, query } from "@/lib/db/client";
+import { closePool, query } from "@/lib/db/client";
 
 const SLUG = "demo-expo";
 const TARGET_JUDGES_PER_POSTER = 3;
@@ -69,9 +66,15 @@ const JUDGE_NAMES = [
 async function main() {
   console.log("Seeding demo event...\n");
 
-  // Opening the database also applies any pending migrations, so a fresh checkout can
-  // seed without a separate setup step.
-  await getDb();
+  // Migrations are a separate step now, so say so plainly rather than failing later
+  // with a bare "relation events does not exist".
+  const [schema] = await query<{ present: boolean }>(
+    "select to_regclass('public.events') is not null as present",
+  );
+  if (!schema?.present) {
+    console.error("No schema found. Run `npm run migrate` first.");
+    process.exit(1);
+  }
 
   // Cascades to posters, judges, criteria, assignments and submissions.
   await query("delete from events where slug = $1", [SLUG]);
@@ -158,8 +161,8 @@ async function main() {
 }
 
 main()
-  .then(() => process.exit(0))
   .catch((error) => {
     console.error("\nSeed failed:", error?.message ?? error);
-    process.exit(1);
-  });
+    process.exitCode = 1;
+  })
+  .finally(closePool);

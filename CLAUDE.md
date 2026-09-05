@@ -13,7 +13,7 @@ There is **no HTTP API**. The backend is three things fused into the Next.js pro
 
 - `app/actions/*.ts` — 22 Server Actions (18 admin, 4 judge). Client components import
   them as functions, not URLs.
-- `lib/data/*.ts` — reads called directly from server components (~24 `db()` sites).
+- `lib/data/*.ts` — reads called directly from server components, hand-written SQL.
 - Postgres — the real logic. Aggregation lives in `supabase/migrations/0002_views.sql`,
   atomic writes + authorization in `save_submission` (`0003`). Prefer changing SQL over
   reimplementing it in TypeScript.
@@ -30,25 +30,34 @@ re-checks the session itself (`requireAdmin()` / `getJudgeSession()`).
 - **`save_submission` upserts on `(judge, poster)`** and replaces child score rows
   wholesale. The offline outbox in `lib/outbox.ts` depends on that idempotency — a replayed
   submission must overwrite, never double-count.
-- **The service-role key must never reach the client.** `lib/supabase/admin.ts` imports
-  `server-only` so a bad import is a build error, not a leak. Keep it that way.
+- **`DATABASE_URL` must never reach the client.** `lib/db/index.ts` imports `server-only`
+  so a bad import is a build error, not a leak. Keep it that way; scripts import
+  `lib/db/client` instead.
 - **Every table is RLS deny-all with privileges revoked.** All access goes through server
-  code holding the service-role key *after* it has checked authorization. Consequence: the
-  browser cannot use Realtime, so the dashboard polls (`components/auto-refresh.tsx`).
+  code on a direct Postgres connection *after* it has checked authorization. Consequence:
+  the browser cannot use Realtime, so the dashboard polls (`components/auto-refresh.tsx`).
 
 ## Conventions
 
-- Migrations are applied **by hand** in the Supabase SQL editor — there is no migration
-  runner. Schema changes need a new numbered file in `supabase/migrations/`.
+- Migrations run via `npm run migrate`. Schema changes need a new numbered file in
+  `supabase/migrations/`. Keep Supabase-specific DDL (anything touching `auth.users` or
+  the anon/authenticated roles) in `0004` — `tests/schema.test.ts` runs `0001`–`0003`
+  against a plain in-memory Postgres, and that only works while the split holds.
 - `lib/types.ts` is hand-written, not generated, so it can drift from the schema. Check it
   against the migrations when touching either.
 - `npm test` — node's test runner via tsx, over the pure modules (`scoring`, `assign`,
-  `codes`). Those three are dependency-free on purpose; keep them that way.
+  `codes`) plus the SQL views. Those three modules are dependency-free on purpose; keep
+  them that way.
 - Judges may score **any poster in their own event**, not only assigned ones. Assignments
   are a suggested walking order. Crossing events is what's forbidden.
 
 ## Decisions already made
 
+- **The database is hosted Supabase Postgres, reached over a connection string** — not
+  PostgREST, and not embedded. `lib/db/client.ts` is the only seam; everything above it
+  is hand-written SQL. Two constraints that live there: use the transaction pooler
+  (6543) so serverless instances cannot exhaust connections, and never name a prepared
+  statement, because transaction-mode pooling will not find it again.
 - **Backend stays in TypeScript.** A Java/Spring port was evaluated on 2026-08-13 and
   judged not worth it: the valuable logic is already in SQL, load is trivial, and a port
   mainly means inventing the API seam that doesn't currently exist. If it is ever revisited,

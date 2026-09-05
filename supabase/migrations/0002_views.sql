@@ -104,6 +104,3 @@ from judges j
 left join assignments a on a.judge_id = j.id
 left join submissions s on s.judge_id = j.id
 group by j.id;
-
-revoke all on v_submission_totals, v_judge_stats, v_poster_results, v_judge_progress
-  from anon, authenticated;

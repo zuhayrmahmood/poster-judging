@@ -8,17 +8,24 @@ function required(name: string): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(
-      `Missing environment variable ${name}. The Electron shell sets this at launch; ` +
-        `for a bare "npm run dev", copy .env.example to .env.local and fill it in.`,
+      `Missing environment variable ${name}. Copy .env.example to .env.local and fill it in.`,
     );
   }
   return value;
 }
 
 export const env = {
+  get supabaseUrl() {
+    return required("NEXT_PUBLIC_SUPABASE_URL");
+  },
+  get supabaseAnonKey() {
+    return required("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  },
+  /** Signs the judge session cookie. */
   get judgeSessionSecret() {
     return required("JUDGE_SESSION_SECRET");
   },
+  /** Mixed into every access-code hash. Changing it invalidates every issued code. */
   get judgeCodePepper() {
     return required("JUDGE_CODE_PEPPER");
   },

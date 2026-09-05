@@ -1,11 +1,14 @@
 -- Poster judging platform: core schema.
 --
 -- Security posture: every table below is RLS-enabled with *no policies*, which denies
--- the `anon` and `authenticated` roles outright. All access goes through Next.js server
--- code using the service-role key, which bypasses RLS, after that code has checked
--- authorization itself. A leaked anon key therefore exposes nothing.
-
-create extension if not exists pgcrypto;
+-- the `anon` and `authenticated` roles outright. Supabase exposes these tables through
+-- PostgREST whether or not this app uses it, so that lockdown is what stands between a
+-- leaked anon key and the whole database. The app itself connects over a direct
+-- connection string as the table owner, and an owner bypasses RLS — see lib/db/client.ts.
+--
+-- 0004_supabase_auth.sql adds the parts that only make sense on Supabase: the `admins`
+-- table (which references `auth.users`) and the privilege revokes. Keeping them out of
+-- this file is what lets tests/schema.test.ts run 0001-0003 against a plain Postgres.
 
 create type event_status as enum ('draft', 'active', 'locked');
 create type submission_status as enum ('draft', 'submitted');
@@ -23,14 +26,6 @@ create table events (
   -- coverage warning, which is what tells an admin where to send the next judge.
   target_judges_per_poster int not null default 3 check (target_judges_per_poster > 0),
   created_at               timestamptz not null default now()
-);
-
--- Admins are Supabase Auth users; membership in this table is what grants access.
-create table admins (
-  id         uuid primary key references auth.users (id) on delete cascade,
-  email      text not null,
-  name       text,
-  created_at timestamptz not null default now()
 );
 
 -- ---------------------------------------------------------------------------
@@ -128,17 +123,20 @@ create table submission_scores (
 -- ---------------------------------------------------------------------------
 -- Login throttling
 --
--- Postgres-backed because Vercel Hobby has no Redis. Volume is trivial: a few hundred
--- rows per event, pruned by the cleanup function below.
+-- Keyed on the peppered hash of the code that was typed, NOT on client IP. A hall of
+-- judges shares one venue IP, so an IP key means ten mistyped codes anywhere in the
+-- room lock out everyone for the window — the failure mode recorded as KNOWN-ISSUES #3.
+-- Keying on the attempted code throttles brute force against a single code while
+-- leaving every other judge unaffected.
 -- ---------------------------------------------------------------------------
 
 create table login_attempts (
   id           bigserial primary key,
-  ip           inet not null,
+  code_hash    text not null,
   attempted_at timestamptz not null default now()
 );
 
-create index login_attempts_ip_time_idx on login_attempts (ip, attempted_at desc);
+create index login_attempts_code_time_idx on login_attempts (code_hash, attempted_at desc);
 
 create or replace function prune_login_attempts()
 returns void
@@ -170,7 +168,6 @@ create trigger submissions_set_updated_at
 -- ---------------------------------------------------------------------------
 
 alter table events            enable row level security;
-alter table admins            enable row level security;
 alter table posters           enable row level security;
 alter table judges            enable row level security;
 alter table criteria          enable row level security;
@@ -180,15 +177,5 @@ alter table submission_scores enable row level security;
 alter table login_attempts    enable row level security;
 
 -- No policies are defined on purpose: RLS with zero policies denies everything to
--- anon and authenticated. Only the service role, which bypasses RLS, can read or write.
-
--- Belt and braces. Supabase grants table privileges to anon/authenticated by default,
--- and a plain view is not itself RLS-protected — revoking outright closes that gap for
--- the views created in 0002.
-revoke all on all tables in schema public from anon, authenticated;
-revoke all on all sequences in schema public from anon, authenticated;
-revoke all on all functions in schema public from anon, authenticated;
-
-alter default privileges in schema public revoke all on tables from anon, authenticated;
-alter default privileges in schema public revoke all on sequences from anon, authenticated;
-alter default privileges in schema public revoke all on functions from anon, authenticated;
+-- anon and authenticated. The app's own connection owns these tables and so is not
+-- subject to them.
