@@ -1,6 +1,11 @@
 import "server-only";
 
 import { num, numOr, one, query } from "@/lib/db";
+import {
+  SELECT_OWNED_POSTER,
+  SELECT_OWNED_POSTER_SHEETS,
+  SELECT_PRIMARY_EVENT_FOR_ADMIN,
+} from "@/lib/sql/scoped";
 import type {
   Criterion,
   Event,
@@ -10,21 +15,32 @@ import type {
 } from "@/lib/types";
 
 /**
- * Admin reads. Callers must have passed `requireAdmin()` first — nothing here checks.
+ * Admin reads.
+ *
+ * The `eventId`-taking functions below do no authorization of their own — callers must
+ * have passed `requireEventScope(eventId)` first, which proves the caller belongs to an
+ * organisation that owns that event. The functions taking a bare child id *do* scope
+ * themselves, because there is no event in the signature for a caller to have checked.
  */
 
 const JUDGE_COLUMNS = "id, event_id, name, email, code_hint, active, created_at";
 
 /**
- * The event the dashboard shows. The schema is multi-event, but the UI assumes one at a
- * time: prefer the active one, else the most recently created.
+ * The event the dashboard shows, scoped to whoever is asking. The schema is
+ * multi-event, but the UI is still one-event-at-a-time: prefer the active one, else the
+ * most recently created, among the events this admin's organisations own.
  */
-export async function getPrimaryEvent(): Promise<Event | null> {
-  return one<Event>(
-    `select * from events
-      order by (status = 'active') desc, created_at desc
-      limit 1`,
-  );
+export async function getPrimaryEventForAdmin(adminId: string): Promise<Event | null> {
+  return one<Event>(SELECT_PRIMARY_EVENT_FOR_ADMIN, [adminId]);
+}
+
+/**
+ * One event by id, with **no** authorization of its own — the caller must already have
+ * proven access to it, either through `requireEventScope` or by having loaded a row
+ * that belongs to it via an ownership-scoped query.
+ */
+export async function getEventById(eventId: string): Promise<Event | null> {
+  return one<Event>("select * from events where id = $1", [eventId]);
 }
 
 export type RankedResult = PosterResult & { rank: number };
@@ -125,8 +141,17 @@ export type PosterSheet = {
   scores: Record<string, number>;
 };
 
-/** Every judge's sheet for one poster, for the drill-down view. */
-export async function getPosterSheets(posterId: string): Promise<PosterSheet[]> {
+/**
+ * Every judge's sheet for one poster, for the drill-down view.
+ *
+ * Scoped by admin rather than by event: the caller passes a bare poster id, so there is
+ * no event for them to have checked. Unscoped, this returned any event's full per-judge
+ * scores and comments to any signed-in organiser who could produce a poster UUID.
+ */
+export async function getPosterSheets(
+  posterId: string,
+  adminId: string,
+): Promise<PosterSheet[]> {
   type Row = {
     submission_id: string;
     judge_id: string;
@@ -138,24 +163,7 @@ export async function getPosterSheets(posterId: string): Promise<PosterSheet[]> 
     scores: Record<string, number> | null;
   };
 
-  const rows = await query<Row>(
-    `select s.id          as submission_id,
-            s.judge_id,
-            j.name        as judge_name,
-            s.comment,
-            s.submitted_at,
-            t.pct,
-            (select jsonb_object_agg(ss.criterion_id, ss.value)
-               from submission_scores ss
-              where ss.submission_id = s.id) as scores
-       from submissions s
-       join judges j on j.id = s.judge_id
-       left join v_submission_totals t on t.submission_id = s.id
-      where s.poster_id = $1
-        and s.status = 'submitted'
-      order by j.name`,
-    [posterId],
-  );
+  const rows = await query<Row>(SELECT_OWNED_POSTER_SHEETS, [posterId, adminId]);
 
   return rows.map((row) => ({
     judgeId: row.judge_id,
@@ -169,6 +177,13 @@ export async function getPosterSheets(posterId: string): Promise<PosterSheet[]> 
   }));
 }
 
-export async function getPoster(posterId: string): Promise<Poster | null> {
-  return one<Poster>("select * from posters where id = $1", [posterId]);
+/**
+ * One poster, ownership-checked. Same reasoning as `getPosterSheets`: a bare poster id
+ * carries no event for the caller to have proven, so the check happens here.
+ */
+export async function getOwnedPoster(
+  posterId: string,
+  adminId: string,
+): Promise<Poster | null> {
+  return one<Poster>(SELECT_OWNED_POSTER, [posterId, adminId]);
 }

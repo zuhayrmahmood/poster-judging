@@ -1,0 +1,1027 @@
+---
+title: Multi-organiser poster judging
+kind: plan
+slug: multi-organiser
+localOnly: true
+---
+
+## Objective
+
+Turn poster-judging from an app you run for one event into a hosted service where
+organisers you have never met run their own events, on a public URL, without being able
+to see or touch each other's data.
+
+**Done means:** two organisers can each hold an event on the same deployment; neither can
+read, mutate, or even confirm the existence of the other's posters, judges, rubric, or
+results; every resource is reachable through a RESTful CRUD API with correct verbs and
+status codes; new organisers arrive by redeeming an invite rather than by you running SQL;
+and the whole thing is deployed on Vercel against Supabase Postgres.
+
+The judge experience does not change at all. Judges keep typing an 8-character code at
+`/`, and the code alone still resolves them to their event.
+
+<Callout id="status" tone="success">
+
+**Phases 1 and 2 are implemented** on branch `multi-tenant-phases-1-2` — 105 tests
+passing, typecheck, lint and build clean. A second organiser is now safe to add.
+Ownership exists in the schema, every admin action is scoped through the service layer,
+and the poster-detail IDOR is closed. What remains before outside organisers can arrive
+on their own is Phase 5: creating an account still means running SQL by hand.
+
+Each phase below carries its own status. Two things landed differently from the original
+design, both noted in place: `org_invites` shipped early in `0006`, and the service layer
+turned out **not** to be unit-testable the way this plan assumed.
+
+</Callout>
+
+<Callout id="risk-today" tone="risk">
+
+**This was a security project before it was a feature project.** The schema was already
+multi-*event*, but nothing above it was multi-*organiser*: `admins` was a flat global
+allowlist, `events` had no owner, and every admin action checked "are you *an* organiser"
+rather than "do you own this one." The moment a second organiser account existed, those
+stopped being missing features.
+
+The sharpest edge was `regenerateAllCodes(eventId)` — it returned **every plaintext judge
+code** for whatever event id it was handed, and rotated the stored hashes on the way out.
+One request would take over another organiser's judging panel and lock their real judges
+out mid-event. `tests/tenancy.test.ts` now pins exactly that case, asserting both that
+the write is refused and that the victim's `code_hash` is untouched.
+
+Two smaller holes closed with it: the poster-detail page loaded any poster by UUID and
+then trusted `poster.event_id`, handing over another event's full per-judge scores and
+comments; and `getPrimaryEvent()` returned one global event for every admin, so a second
+organiser would have signed in and landed on the first one's dashboard.
+
+</Callout>
+
+### Where the authorization boundary sits
+
+<Diagram id="authz-boundary" frame="show" caption="requireAdmin() answers the wrong question. getEventScope() answers the right one, in a single query.">
+
+```html
+<div class="authz-grid">
+  <div class="diagram-panel authz-col" data-rough>
+    <div class="authz-head">
+      <span class="diagram-pill authz-pill-warn">Today</span>
+      <span class="diagram-muted">single-tenant</span>
+    </div>
+    <div class="diagram-node authz-step">POST to a Server Action</div>
+    <div class="authz-arrow">&#8595;</div>
+    <div class="diagram-box authz-check">
+      <strong>requireAdmin()</strong>
+      <span class="diagram-muted">row in <code>admins</code>?</span>
+    </div>
+    <div class="authz-arrow">&#8595;</div>
+    <div class="diagram-box authz-blast authz-bad">
+      <strong>Every event on the platform</strong>
+      <span class="diagram-muted">eventId is taken on trust</span>
+    </div>
+  </div>
+
+  <div class="diagram-panel authz-col" data-rough>
+    <div class="authz-head">
+      <span class="diagram-pill authz-pill-ok">Target</span>
+      <span class="diagram-muted">multi-tenant</span>
+    </div>
+    <div class="diagram-node authz-step">POST to a Server Action</div>
+    <div class="authz-arrow">&#8595;</div>
+    <div class="diagram-box authz-check">
+      <strong>getEventScope(eventId)</strong>
+      <span class="diagram-muted">membership in this event&#39;s org?</span>
+    </div>
+    <div class="authz-arrow">&#8595;</div>
+    <div class="diagram-box authz-blast authz-good">
+      <strong>This one event</strong>
+      <span class="diagram-muted">null reads the same as &#34;no such event&#34;</span>
+    </div>
+  </div>
+</div>
+```
+
+```css
+.authz-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; }
+.authz-col { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 16px; }
+.authz-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.authz-pill-warn { background: var(--wf-warn); color: var(--wf-paper); }
+.authz-pill-ok { background: var(--wf-ok); color: var(--wf-paper); }
+.authz-step { text-align: center; padding: 10px 12px; }
+.authz-arrow { text-align: center; color: var(--wf-muted); line-height: 1; }
+.authz-check { display: flex; flex-direction: column; gap: 4px; padding: 12px; text-align: center; }
+.authz-blast { display: flex; flex-direction: column; gap: 4px; padding: 14px 12px; text-align: center; }
+.authz-bad { border-color: var(--wf-warn); }
+.authz-good { border-color: var(--wf-ok); }
+.authz-col code { font-size: 0.9em; }
+```
+
+</Diagram>
+
+## Scope
+
+**In scope.** An org/membership ownership model; a service layer that owns authorization
+and validation; ownership enforcement on all 18 admin actions and every admin read; a
+RESTful HTTP API over every resource; the event moved into the admin URL; invite-gated
+organiser signup; and the deployment and scale work needed to run this for many tenants at
+once.
+
+**Not in scope.** The judge *interface*, whose offline behaviour is delicate and stays as
+it is. The judge authorization path is already tenant-correct end to end — the session JWT
+carries `{judgeId, eventId}`, `signIn` reads `event_id` from the judges row and never from
+the client, and `save_submission` re-derives the event in SQL and refuses cross-event
+posters and criteria. Also out: API tokens for external clients (D11 defers them),
+per-org branding, billing, org deletion and data export, and Supabase Realtime, which is
+structurally blocked by the RLS deny-all model and for which polling is the intended
+answer.
+
+<Callout id="rls-note" tone="warning">
+
+**RLS is not a safety net here.** Every table is RLS-enabled with no policies, but the app
+connects over `DATABASE_URL` as the role that owns the tables, and an owner bypasses RLS.
+That deny-all exists to make a leaked anon key worthless — it does nothing for tenant
+isolation. Every tenancy check must live in application code or in the SQL predicate
+itself, which is why the enforcement pattern below folds ownership into the mutating
+statement rather than trusting a policy.
+
+</Callout>
+
+## Decisions
+
+<Table
+  id="decisions"
+  columns={["#", "Decision", "Hard to reverse?"]}
+  rows={[
+    ["D1", "`memberships` lands in the portable migration lane with a bare `admin_id uuid`; the FK to `admins` is added in the Supabase-only lane", "No"],
+    ["D2", "`memberships` is the grant; `admins` demotes to a profile row", "No"],
+    ["D3", "`events.slug` becomes unique per org, not globally", "Yes — do it now, while one org exists"],
+    ["D4", "Admin URLs carry the event UUID: `/admin/events/[eventId]/…`. No current-event cookie", "Yes (bookmarks)"],
+    ["D5", "Child-id actions scope via an ownership join inside the mutating statement, not a pre-lookup", "No"],
+    ["D6", "Scoped SQL lives in `lib/sql/scoped.ts` as exported strings, imported by both actions and tests", "No"],
+    ["D7", "Invite codes are 16 chars (two `generateCode()` calls) with a separate `INVITE_CODE_PEPPER`", "No"],
+    ["D8", "The first organiser bootstraps via `scripts/bootstrap-admin.ts` — never first-signup-wins", "No"],
+    ["D9", "Judge `code_hash` stays globally unique, so code generation gains retry-on-unique-violation", "Yes (locks in one global code space)"],
+    ["D10", "`lib/services/*.ts` owns authorization, validation and SQL. Route Handlers and Server Actions are both thin adapters over it", "No"],
+    ["D11", "API auth is the existing cookie session plus a same-origin check. Bearer tokens for external clients are deferred", "No — the auth resolver is one function"],
+    ["D12", "Judge submissions become `PUT /api/events/{eventId}/submissions/{posterId}`, because the write is already idempotent", "No"],
+  ]}
+/>
+
+<Callout id="d1-rationale" tone="decision">
+
+**D1 is the pivotal one.** `tests/schema.test.ts` runs migrations against in-memory PGlite,
+which has no Supabase `auth` schema — that is why `0004_supabase_auth.sql` is excluded
+today. Keeping `memberships` portable with a bare `admin_id`, combined with D2 making
+membership the grant, means **every tenancy predicate the app runs is executable under the
+existing test harness**. That is the only reason the cross-tenant denial tests in Phase 4
+are possible at all. If `memberships` went into the Supabase-only lane, the tenancy
+boundary would be the one part of the system that could never be tested.
+
+</Callout>
+
+## Phase 1 — Ownership in the schema · **shipped**
+
+No application code changes; deployable on its own, and the running app cannot tell the
+difference. Two migrations, one per lane.
+
+<DataModel
+  id="schema-target"
+  entities={[
+    {
+      id: "organisations",
+      name: "organisations",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "name", type: "text" },
+        { name: "slug", type: "text" }
+      ]
+    },
+    {
+      id: "memberships",
+      name: "memberships",
+      fields: [
+        { name: "org_id", type: "uuid", pk: true, fk: "organisations.id" },
+        { name: "admin_id", type: "uuid", pk: true, fk: "admins.id" },
+        { name: "role", type: "membership_role" }
+      ]
+    },
+    {
+      id: "admins",
+      name: "admins",
+      fields: [
+        { name: "id", type: "uuid", pk: true, fk: "auth.users.id" },
+        { name: "email", type: "text" },
+        { name: "name", type: "text", nullable: true }
+      ]
+    },
+    {
+      id: "org_invites",
+      name: "org_invites",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "org_id", type: "uuid", nullable: true, fk: "organisations.id" },
+        { name: "email", type: "text" },
+        { name: "code_hash", type: "text" },
+        { name: "used_at", type: "timestamptz", nullable: true }
+      ]
+    },
+    {
+      id: "events",
+      name: "events",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "org_id", type: "uuid", fk: "organisations.id" },
+        { name: "slug", type: "text" },
+        { name: "status", type: "event_status" }
+      ]
+    },
+    {
+      id: "judges",
+      name: "judges",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "event_id", type: "uuid", fk: "events.id" },
+        { name: "code_hash", type: "text" },
+        { name: "active", type: "boolean" }
+      ]
+    },
+    {
+      id: "posters",
+      name: "posters",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "event_id", type: "uuid", fk: "events.id" },
+        { name: "code", type: "text" }
+      ]
+    }
+  ]}
+  relations={[
+    { from: "organisations", to: "memberships", kind: "1-n" },
+    { from: "admins", to: "memberships", kind: "1-n" },
+    { from: "organisations", to: "events", kind: "1-n" },
+    { from: "organisations", to: "org_invites", kind: "1-n" },
+    { from: "events", to: "judges", kind: "1-n" },
+    { from: "events", to: "posters", kind: "1-n" }
+  ]}
+/>
+
+Three things in that model carry weight. `memberships` is the grant, so authorization
+never joins `admins`. `org_invites.org_id` is **nullable** — a null means "redeeming this
+mints a brand-new organisation", which is how an outside organiser gets in at all.
+And `judges.code_hash` stays **globally** unique rather than per-event, because the judge
+sign-in page has no event context to scope by.
+
+### The portable migration
+
+<Code
+  id="mig-0006"
+  filename="supabase/migrations/0006_organisations.sql"
+  language="sql"
+  caption="Portable lane — add this to MIGRATIONS in tests/schema.test.ts."
+  code={"create type membership_role as enum ('owner', 'admin');\n\ncreate table organisations (\n  id uuid primary key default gen_random_uuid(),\n  name text not null,\n  slug text not null unique,\n  created_at timestamptz not null default now()\n);\n\n-- admin_id is a bare uuid on purpose: the FK to `admins` (which references auth.users)\n-- is added in 0007, the Supabase-only lane. That keeps this table -- and therefore every\n-- tenancy predicate in the app -- runnable under tests/schema.test.ts's PGlite harness.\ncreate table memberships (\n  org_id uuid not null references organisations (id) on delete cascade,\n  admin_id uuid not null,\n  role membership_role not null default 'admin',\n  created_at timestamptz not null default now(),\n  primary key (org_id, admin_id)\n);\ncreate index memberships_admin_idx on memberships (admin_id);\n\nalter table events add column org_id uuid references organisations (id) on delete cascade;\n\ninsert into organisations (name, slug)\nselect 'Default organisation', 'default' where exists (select 1 from events);\n\nupdate events set org_id = (select id from organisations where slug = 'default')\n where org_id is null;\n\nalter table events alter column org_id set not null;\ncreate index events_org_idx on events (org_id, created_at desc);\n\n-- D3: slug uniqueness moves inside the org.\nalter table events drop constraint events_slug_key;\nalter table events add constraint events_org_slug_key unique (org_id, slug);"}
+/>
+
+`alter column org_id set not null` is safe on an empty database: the update touches
+nothing and the constraint holds vacuously. `0007_org_membership.sql` then adds the FK
+from `memberships.admin_id` to `admins`, and backfills every existing admin as an `owner`
+of the bootstrap org — so your own account keeps working untouched across the whole
+migration.
+
+**Shipped differently:** `org_invites` landed here in `0006` rather than waiting for its
+own migration in Phase 5. Creating the table costs nothing until something writes to it,
+and putting it in the portable lane makes the redemption queries testable under PGlite
+for free — the same reasoning that put `memberships` there. Phase 5 therefore adds no
+migration at all, only the actions and the UI.
+
+`scripts/seed.ts` and the `tests/schema.test.ts` fixture both insert events directly and
+will fail on the new `not null` until they pass an `org_id`.
+
+## Phase 2 — Service layer and authorization · **shipped**
+
+<Callout id="smallest-cut" tone="decision">
+
+**This is the smallest cut that makes a second organiser safe, and it does not need the
+routing change or the API.** After Phase 1 every admin belongs to exactly one org, so
+`getPrimaryEvent()` only has to become `getPrimaryEventForAdmin(adminId)`. Each admin
+still sees one event — now provably theirs — with every write ownership-checked. Zero URL
+changes, zero component prop changes. Ship this before organiser #2 exists; everything
+after it is product work rather than security work.
+
+</Callout>
+
+<Callout id="service-timing" tone="decision">
+
+**The service extraction belongs in this phase, not after the API is designed.** Phase 2
+already rewrites the authorization inside all 18 actions. If the services are extracted
+later, every one of those actions gets opened twice — and the second pass is the one where
+a check quietly goes missing. Extract `lib/services/*.ts` here, make the actions thin
+wrappers over it, and Phase 3's Route Handlers become a transport adapter with no
+authorization logic of its own.
+
+</Callout>
+
+### The shape of a service
+
+A service function takes an **explicit actor** and never touches cookies, `redirect()`, or
+`revalidatePath()` — those belong to the transport. It returns a discriminated result so
+each adapter can translate failure its own way: a Server Action into `{ error }` for the
+existing UI convention, a Route Handler into a status code.
+
+<Code
+  id="service-shape"
+  filename="lib/services/posters.ts"
+  language="ts"
+  caption="Authorization, validation and SQL in one place. No cookies, no redirects, no cache invalidation."
+  code={"export type ServiceResult<T> =\n  | { ok: true; data: T }\n  | { ok: false; code: ServiceError; message: string };\n\n/** not_found covers \"not yours\" too -- never 403, or event ids become an oracle. */\nexport type ServiceError =\n  | \"unauthenticated\"\n  | \"not_found\"\n  | \"invalid\"\n  | \"conflict\"\n  | \"rate_limited\";\n\nexport async function deletePoster(\n  actor: AdminUser,\n  posterId: string,\n): Promise<ServiceResult<null>> {\n  const rows = await query<{ id: string }>(DELETE_OWNED_POSTER, [\n    posterId,\n    actor.id,\n  ]);\n\n  if (rows.length === 0) {\n    return { ok: false, code: \"not_found\", message: \"Poster not found.\" };\n  }\n  return { ok: true, data: null };\n}"}
+/>
+
+### The three files that matter
+
+<TabsBlock
+  id="file-map"
+  orientation="vertical"
+  tabs={[
+    {
+      id: "tab-getprimary",
+      label: "lib/data/admin.ts",
+      blocks: [
+        {
+          id: "ac-getprimary",
+          type: "annotated-code",
+          data: {
+            filename: "lib/data/admin.ts",
+            language: "ts",
+            code: "/**\n * The event the dashboard shows. The schema is multi-event, but the UI assumes one at a\n * time: prefer the active one, else the most recently created.\n */\nexport async function getPrimaryEvent(): Promise<Event | null> {\n  return one<Event>(\n    `select * from events\n      order by (status = 'active') desc, created_at desc\n      limit 1`,\n  );\n}",
+            annotations: [
+              { lines: "2-3", label: "The admission", note: "The doc comment already knows. This was a deliberate single-tenant shortcut, not an accident." },
+              { lines: "5", label: "No caller", note: "Takes no adminId. It cannot scope to anyone, because it is never told who is asking." },
+              { lines: "7-9", label: "No WHERE", note: "One global row for every admin on the platform. Organiser B signs in and lands on organiser A's dashboard, and every manage button then posts A's event.id back into the actions." }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "tab-rotate",
+      label: "app/actions/admin.ts",
+      blocks: [
+        {
+          id: "ac-rotate",
+          type: "annotated-code",
+          data: {
+            filename: "app/actions/admin.ts",
+            language: "ts",
+            code: "export async function regenerateAllCodes(eventId: string) {\n  await requireAdmin();\n\n  const judges = await query<{ id: string; name: string }>(\n    \"select id, name from judges where event_id = $1 and active order by name\",\n    [eventId],\n  );\n\n  if (judges.length === 0) return { error: \"No active judges.\", cards: [] };\n\n  const cards = judges.map((judge) => ({\n    id: judge.id,\n    name: judge.name,\n    code: generateCode(),\n  }));\n\n  // ... rotates every code_hash in one transaction ...\n\n  return {\n    error: null,\n    cards: cards.map(({ name, code }) => ({ name, code })),\n  };\n}",
+            annotations: [
+              { lines: "2", label: "The only check", note: "Proves the caller is an organiser. Proves nothing about this eventId." },
+              { lines: "4-7", label: "Attacker-supplied", note: "eventId comes straight from the request body. Server Actions are reachable by direct POST." },
+              { lines: "19-21", label: "Privilege escalation", note: "Returns every judge's plaintext code for that event, and the old hashes are already gone — so the victim's real judges are locked out at the same moment." }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "tab-scoped",
+      label: "lib/sql/scoped.ts",
+      blocks: [
+        {
+          id: "ac-scoped",
+          type: "annotated-code",
+          data: {
+            filename: "lib/sql/scoped.ts",
+            language: "ts",
+            code: "// A pure module -- no `server-only` -- so tests can import the exact strings\n// the actions run. A test against a hand-copied query proves nothing.\n\nexport const DELETE_OWNED_POSTER = `\n  delete from posters p\n   using events e\n   join memberships m on m.org_id = e.org_id and m.admin_id = $2\n   where p.id = $1 and e.id = p.event_id\n  returning p.id`;\n\nexport const ROTATE_OWNED_JUDGE_CODE = `\n  update judges j\n     set code_hash = $2, code_hint = $3\n    from events e\n    join memberships m on m.org_id = e.org_id and m.admin_id = $4\n   where j.id = $1 and e.id = j.event_id\n  returning j.id`;",
+            annotations: [
+              { lines: "1-2", label: "D6", note: "Exported strings, not inline SQL, so tests/tenancy.test.ts executes the identical text." },
+              { lines: "6-8", label: "D5", note: "Ownership is a join inside the DELETE. No pre-lookup means no extra round trip and no TOCTOU window between check and write." },
+              { lines: "9", label: "Read the count", note: "rows.length === 0 means 'not yours or not there'. The caller cannot tell those apart, so event ids stay unguessable." }
+            ]
+          }
+        }
+      ]
+    }
+  ]}
+/>
+
+### What an action looks like afterwards
+
+<Diff
+  id="diff-delete-poster"
+  filename="app/actions/admin.ts"
+  language="ts"
+  mode="split"
+  before={"export async function deletePoster(posterId: string) {\n  await requireAdmin();\n  await query(\"delete from posters where id = $1\", [posterId]);\n  revalidatePath(\"/admin/posters\");\n}"}
+  after={"export async function deletePoster(posterId: string) {\n  const admin = await requireAdmin();\n\n  const result = await posters.deletePoster(admin, posterId);\n  if (!result.ok) return { error: result.message };\n\n  revalidatePath(\"/admin/posters\");\n  return { error: null };\n}"}
+  annotations={[
+    { side: "after", lines: "2", label: "Transport concern", note: "requireAdmin() resolves the actor and redirects when signed out. That is the adapter's job, not the service's." },
+    { side: "after", lines: "4-5", label: "All the logic", note: "Ownership, the SQL, and the not_found decision live in the service and are shared verbatim with the Route Handler." },
+    { side: "after", lines: "7", label: "Also transport", note: "revalidatePath is a Server Action concern. The REST adapter has no cache to invalidate." }
+  ]}
+/>
+
+The same shape covers the other five child-id actions — `regenerateJudgeCode`,
+`setJudgeActive`, `deleteJudge`, `updateCriterion`, `deleteCriterion` — plus the two
+unscoped reads, `getPosterSheets` and `getPoster`. The eleven actions that take an
+`eventId` instead call `getEventScope(eventId)` and bail on null; one extra query on a
+page-level mutation is not worth inlining.
+
+`app/admin/(dashboard)/poster/[posterId]/page.tsx` is the live read-side hole: it fetches
+an unscoped poster and then trusts `poster.event_id` for everything downstream, so any
+poster UUID renders that event's full per-judge score sheets.
+
+While here, `createJudge` and `regenerateAllCodes` gain retry-on-`23505` for
+`judges_code_hash_key` (D9). A collision in a global code space is rare but today
+surfaces as a bare "Couldn't add that judge."
+
+## Phase 3 — The REST API · next up
+
+Once the services exist, a Route Handler is a transport adapter and nothing more: resolve
+the actor, parse the body, call the service, map the result to a status code. No
+authorization logic lives here, which is the whole point of doing Phase 2 first.
+
+<Diagram id="transport-layers" frame="show" caption="Two transports, one authorization path. The service layer is the only place ownership is decided.">
+
+```html
+<div class="diagram-panel layers" data-rough>
+  <div class="layer-row">
+    <div class="diagram-box layer-item">
+      <strong>app/api/**/route.ts</strong>
+      <span class="diagram-muted">REST &#183; status codes &#183; same-origin check</span>
+    </div>
+    <div class="diagram-box layer-item">
+      <strong>app/actions/*.ts</strong>
+      <span class="diagram-muted">Server Actions &#183; revalidatePath</span>
+    </div>
+  </div>
+
+  <div class="layer-arrows"><span>&#8595;</span><span>&#8595;</span></div>
+
+  <div class="diagram-box layer-core">
+    <strong>lib/services/*.ts</strong>
+    <span class="diagram-muted">actor in, ServiceResult out &#183; authorization &#183; validation</span>
+  </div>
+
+  <div class="layer-arrows-single">&#8595;</div>
+
+  <div class="layer-row">
+    <div class="diagram-node layer-leaf">lib/sql/scoped.ts</div>
+    <div class="diagram-node layer-leaf">save_submission()</div>
+    <div class="diagram-node layer-leaf">v_poster_results</div>
+  </div>
+</div>
+```
+
+```css
+.layers { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+.layer-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.layer-item { display: flex; flex-direction: column; gap: 4px; padding: 12px; text-align: center; }
+.layer-core { display: flex; flex-direction: column; gap: 4px; padding: 14px; text-align: center; border-color: var(--wf-accent); }
+.layer-arrows { display: grid; grid-template-columns: 1fr 1fr; text-align: center; color: var(--wf-muted); line-height: 1; }
+.layer-arrows-single { text-align: center; color: var(--wf-muted); line-height: 1; }
+.layer-leaf { text-align: center; padding: 8px 10px; font-size: 0.92em; }
+```
+
+</Diagram>
+
+<Callout id="csrf" tone="risk">
+
+**Server Actions get CSRF protection from Next; Route Handlers do not.** Next validates
+the `Origin` header against the host for Server Action invocations. A cookie-authenticated
+`POST /api/…` has no such protection, so any site the organiser visits could issue writes
+against their session. Every mutating handler must pass through one
+`requireSameOrigin(request)` helper that requires `Sec-Fetch-Site: same-origin` (falling
+back to an `Origin`-vs-host comparison for older browsers) and returns **403** otherwise.
+
+This is also why D11's ordering is clean: `Sec-Fetch-Site` is browser-only, so it is
+exactly the right check while the API is browser-only. When Bearer tokens arrive, a
+token-authenticated request skips the origin check entirely — tokens are not ambiently
+attached to requests, so there is no CSRF surface to defend.
+
+</Callout>
+
+### Resource map
+
+<TabsBlock
+  id="api-surface"
+  tabs={[
+    {
+      id: "tab-api-events",
+      label: "Events & orgs",
+      blocks: [
+        {
+          id: "ep-list-events",
+          type: "api-endpoint",
+          data: {
+            method: "GET",
+            path: "/api/orgs/{orgId}/events",
+            summary: "List events in an organisation",
+            auth: "Session cookie; membership in {orgId}",
+            responses: [
+              { status: "200", description: "OK", example: "{ \"data\": [{ \"id\": \"…\", \"name\": \"2026 Research Expo\", \"slug\": \"2026-research-expo\", \"status\": \"draft\" }] }" },
+              { status: "404", description: "Not a member of this org — deliberately indistinguishable from 'no such org'" }
+            ]
+          }
+        },
+        {
+          id: "ep-create-event",
+          type: "api-endpoint",
+          data: {
+            method: "POST",
+            path: "/api/orgs/{orgId}/events",
+            summary: "Create an event",
+            auth: "Session cookie; membership in {orgId}",
+            request: { contentType: "application/json", example: "{ \"name\": \"2026 Research Expo\" }" },
+            responses: [
+              { status: "201", description: "Created. Location header carries the new event URL." },
+              { status: "409", description: "Slug already used within this org" },
+              { status: "422", description: "Validation failed" }
+            ]
+          }
+        },
+        {
+          id: "ep-patch-event",
+          type: "api-endpoint",
+          data: {
+            method: "PATCH",
+            path: "/api/events/{eventId}",
+            summary: "Rename, retarget, or open/close judging",
+            description: "Opening and closing judging is a status field, so PATCH is the correct verb — no /open or /close action endpoints.",
+            auth: "Session cookie; membership in the event's org",
+            request: { contentType: "application/json", example: "{ \"status\": \"active\" }" },
+            responses: [
+              { status: "200", description: "Updated event" },
+              { status: "404", description: "Not found, or not yours" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "tab-api-posters",
+      label: "Posters",
+      blocks: [
+        {
+          id: "ep-posters-collection",
+          type: "api-endpoint",
+          data: {
+            method: "POST",
+            path: "/api/events/{eventId}/posters",
+            summary: "Create a poster",
+            auth: "Session cookie; membership in the event's org",
+            request: { contentType: "application/json", example: "{ \"code\": \"A-01\", \"title\": \"Deep sea imaging, revisited\", \"presenter_names\": [\"R. Patel\"], \"location\": \"A\" }" },
+            responses: [
+              { status: "201", description: "Created" },
+              { status: "409", description: "Poster code already used in this event" },
+              { status: "422", description: "Validation failed" }
+            ]
+          }
+        },
+        {
+          id: "ep-posters-import",
+          type: "api-endpoint",
+          data: {
+            method: "POST",
+            path: "/api/events/{eventId}/posters/import",
+            summary: "Bulk import from CSV",
+            description: "Takes text/csv directly rather than a JSON-wrapped string. Depends on the RFC 4180 reader that lib/csv.ts is still missing — see the pulled-forward work below.",
+            auth: "Session cookie; membership in the event's org",
+            request: { contentType: "text/csv", example: "code,title,presenters,location\nA-01,\"Imaging, revisited\",R. Patel;J. Kim,A" },
+            responses: [
+              { status: "200", description: "{ \"created\": 12, \"skipped\": 0 }" },
+              { status: "422", description: "Malformed CSV, with the offending row number" }
+            ]
+          }
+        },
+        {
+          id: "ep-poster-delete",
+          type: "api-endpoint",
+          data: {
+            method: "DELETE",
+            path: "/api/events/{eventId}/posters/{posterId}",
+            summary: "Delete a poster",
+            auth: "Session cookie; membership in the event's org",
+            responses: [
+              { status: "204", description: "Deleted" },
+              { status: "404", description: "Not found, or not yours" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "tab-api-judges",
+      label: "Judges & codes",
+      blocks: [
+        {
+          id: "ep-judge-create",
+          type: "api-endpoint",
+          data: {
+            method: "POST",
+            path: "/api/events/{eventId}/judges",
+            summary: "Add a judge and issue their first code",
+            description: "The plaintext code appears in this response and nowhere else — only the peppered hash is stored. Responses carrying codes are sent with Cache-Control: no-store and must never be logged.",
+            auth: "Session cookie; membership in the event's org",
+            request: { contentType: "application/json", example: "{ \"name\": \"Dr. A. Osei\", \"email\": \"a.osei@uni.edu\" }" },
+            responses: [
+              { status: "201", description: "{ \"id\": \"…\", \"name\": \"Dr. A. Osei\", \"code\": \"K7X4M2QP\" }" },
+              { status: "409", description: "Code-hash collision persisted past the retry budget" }
+            ]
+          }
+        },
+        {
+          id: "ep-judge-codes",
+          type: "api-endpoint",
+          data: {
+            method: "POST",
+            path: "/api/events/{eventId}/judges/codes",
+            summary: "Rotate every active judge's code, for the printable card sheet",
+            description: "The one operation that does not map cleanly onto CRUD. Modelled as creating a new set of codes under a sub-collection, which is the conventional REST answer. All-or-nothing in one transaction — a partial rotation would discard plaintext for judges already processed and lock them out mid-print.",
+            auth: "Session cookie; membership in the event's org",
+            responses: [
+              { status: "200", description: "{ \"cards\": [{ \"name\": \"Dr. A. Osei\", \"code\": \"K7X4M2QP\" }] }" },
+              { status: "404", description: "Not found, or not yours" }
+            ]
+          }
+        },
+        {
+          id: "ep-assignments-put",
+          type: "api-endpoint",
+          data: {
+            method: "PUT",
+            path: "/api/events/{eventId}/assignments",
+            summary: "Replace the whole assignment set (auto-assign)",
+            description: "PUT rather than POST because runAutoAssign already deletes every assignment and re-inserts the computed plan — that is a collection replacement by definition, and it makes the operation idempotent.",
+            auth: "Session cookie; membership in the event's org",
+            responses: [
+              { status: "200", description: "{ \"count\": 36 }" },
+              { status: "422", description: "Needs at least one poster and one active judge" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "tab-api-judge-side",
+      label: "Judge submissions",
+      blocks: [
+        {
+          id: "ep-submission-put",
+          type: "api-endpoint",
+          data: {
+            method: "PUT",
+            path: "/api/events/{eventId}/submissions/{posterId}",
+            summary: "Save or submit one score sheet",
+            description: "PUT is exactly right here: save_submission upserts on (judge, poster) and replaces the child score rows wholesale, so a replay overwrites rather than double-counting. The offline outbox's core requirement and the definition of PUT are the same property. The handler asserts the path eventId matches the session's, giving a check independent of the SQL one.",
+            auth: "pj_judge cookie (HS256 JWT carrying judgeId + eventId)",
+            request: { contentType: "application/json", example: "{ \"status\": \"submitted\", \"comment\": \"Strong methodology.\", \"scores\": { \"<criterionId>\": 4 } }" },
+            responses: [
+              { status: "200", description: "Saved. Safe to replay with the same body." },
+              { status: "409", description: "Judging is closed — surfaced inline and never queued by the outbox" },
+              { status: "404", description: "Poster is not in this judge's event" }
+            ]
+          }
+        },
+        {
+          id: "ep-judge-assignments",
+          type: "api-endpoint",
+          data: {
+            method: "GET",
+            path: "/api/judge/assignments",
+            summary: "The judge's walking order with per-poster submission state",
+            auth: "pj_judge cookie",
+            responses: [
+              { status: "200", description: "{ \"data\": [{ \"poster\": {…}, \"status\": \"not_started\", \"updated_at\": null }] }" },
+              { status: "401", description: "No judge session" }
+            ]
+          }
+        }
+      ]
+    }
+  ]}
+/>
+
+### Conventions
+
+<Table
+  id="api-conventions"
+  columns={["Concern", "Rule"]}
+  rows={[
+    ["Cross-tenant access", "**404, never 403.** A 403 confirms the resource exists. `not_found` covers both 'no such thing' and 'not yours' — the caller cannot distinguish them."],
+    ["Verbs", "`GET` read · `POST` create into a collection · `PATCH` partial update · `PUT` replace an addressable resource or whole collection · `DELETE` remove. No verbs in paths."],
+    ["Status codes", "`201` + `Location` on create · `204` on delete · `409` conflict (judging closed, duplicate slug, spent invite) · `422` validation · `429` throttled · `401` no session · `403` origin check failed"],
+    ["Error body", "`{ \"error\": { \"code\": \"not_found\", \"message\": \"…\" } }` — `code` is the `ServiceError` union, so clients branch on a stable string rather than prose."],
+    ["Collections", "`{ \"data\": [...], \"next\": null }`. The envelope exists so cursor pagination can be added without a breaking change."],
+    ["Secrets in responses", "Any body carrying a plaintext judge or invite code is sent `Cache-Control: no-store` and is excluded from request logging."],
+    ["Validation", "One Zod schema per request body, at the handler boundary. The three dependency-free modules (`scoring`, `assign`, `codes`) stay dependency-free — this is a new dependency at the edge only."],
+    ["Versioning", "Unversioned while browser-only. The first external consumer is what earns `/api/v1`; adding it later is a directory move plus a rewrite rule."],
+    ["Proxy", "`proxy.ts` does **not** match `/api/*`, and should not. Handlers resolve their own actor, exactly as Server Actions do."]
+  ]}
+/>
+
+An OpenAPI 3 document lives at `openapi.json`, is served from `/api/openapi.json`, and is
+covered by a test asserting every `app/api/**/route.ts` exported method has a matching
+spec entry — the same trick as the action-scope test, so the docs cannot silently drift
+from the routes.
+
+## Phase 4 — Event id in the URL · not started
+
+Do this when an org needs a second event, or an admin needs a second org — not before.
+The layout calls `requireEventScope(eventId)` **once** and hands every child a proven
+event, which makes the boundary structural rather than remembered.
+
+<FileTree
+  id="route-tree"
+  title="Admin routes after the move"
+  entries={[
+    { path: "app/admin/login/page.tsx", change: "modified", note: "Unchanged behaviour; still exempt from the proxy guard." },
+    { path: "app/admin/join/page.tsx", change: "added", note: "Phase 3. Must also be exempt from guardAdmin, or a signing-up user can never redeem." },
+    { path: "app/admin/page.tsx", change: "added", note: "One event => redirect to it. Several => the picker." },
+    { path: "app/admin/events/[eventId]/layout.tsx", change: "added", note: "requireEventScope(eventId) once, for the whole subtree." },
+    { path: "app/admin/events/[eventId]/page.tsx", change: "renamed", note: "Was app/admin/(dashboard)/page.tsx." },
+    { path: "app/admin/events/[eventId]/posters/page.tsx", change: "renamed" },
+    { path: "app/admin/events/[eventId]/judges/page.tsx", change: "renamed" },
+    { path: "app/admin/events/[eventId]/rubric/page.tsx", change: "renamed" },
+    { path: "app/admin/events/[eventId]/assignments/page.tsx", change: "renamed" },
+    { path: "app/admin/events/[eventId]/settings/page.tsx", change: "renamed" },
+    { path: "app/admin/events/[eventId]/poster/[posterId]/page.tsx", change: "renamed", note: "Can now drop its own ownership query — the layout already proved the event." },
+    { path: "app/admin/events/[eventId]/export/results/route.ts", change: "renamed", note: "Keeps its 401-not-redirect behaviour for non-browser callers." }
+  ]}
+/>
+
+<Callout id="revalidate-trap" tone="warning">
+
+**The trap in this phase:** all 18 `revalidatePath` calls in `app/actions/admin.ts`
+hardcode the current paths — `/admin/posters`, `/admin/judges`, `/admin/rubric`,
+`/admin/assignments`, and `revalidatePath("/admin", "layout")`. Each needs the `eventId`
+prefix, and they fail **silently** if missed: the write lands, and the page just never
+refreshes. Also easy to miss are the two links in the results page,
+`/admin/export/results` and `/admin/poster/${row.poster_id}`.
+
+</Callout>
+
+A current-event cookie was the alternative and is the wrong call — it is ambient
+authority, which is precisely the property that made `getPrimaryEvent()` a bug. Two tabs
+on two halls would fight over it. UUIDs rather than slugs (D4) because slugs are only
+unique per org now, so a slug URL would need `/admin/[orgSlug]/[eventSlug]` and a resolve
+query before the authz query. Slugs stay for CSV filenames.
+
+## Phase 5 — Invite-gated signup · not started
+
+A new organisation can only come into existence by redeeming a code you minted from a
+shell. There is no UI that creates one, which is the whole answer to "signup is not open."
+
+<Mermaid
+  id="invite-flow"
+  caption="Redemption is one transaction: profile row, org, membership, and the invite burn all land together or not at all."
+  source={"sequenceDiagram\n    actor You as You (owner)\n    actor Alice as New organiser\n    participant App as Next.js\n    participant SB as Supabase Auth\n    participant PG as Postgres\n\n    You->>App: createInvite(orgId: null, alice@uni.edu)\n    App->>PG: insert org_invites (code_hash, email)\n    App-->>You: plaintext code, shown once\n    You-->>Alice: send code out of band\n\n    Alice->>App: GET /admin/join?code=...\n    Alice->>SB: signUp(email, password)\n    SB-->>Alice: confirmation email\n    Alice->>SB: click confirm link\n    SB-->>App: redirect to /admin/join?code=...\n\n    Alice->>App: redeemInvite(code)\n    App->>SB: auth.getUser()\n    SB-->>App: user + email_confirmed_at\n    Note over App: reject if email_confirmed_at is null\n\n    rect rgb(240,240,240)\n    App->>PG: select ... for update (invite)\n    App->>PG: insert admins (profile row)\n    App->>PG: insert organisations\n    App->>PG: insert memberships (owner)\n    App->>PG: update org_invites set used_at\n    end\n    App-->>Alice: signed in, owns a new org"}
+/>
+
+`auth.getUser()` is server-revalidated, so `email_confirmed_at` cannot be forged by a
+client — that check is the belt, and Supabase Auth's "Confirm email" setting is the
+braces. `select … for update` plus the in-transaction `used_at is null` check makes
+redemption single-use under concurrent clicks. The `admins` insert must share the
+transaction with the membership, or a partial failure leaves a signed-in organiser with no
+org — which is already the README's most common setup snag and an infinite
+`/admin` ↔ `/admin/login` bounce.
+
+Invite codes are two `generateCode()` calls joined into 16 characters (D7). Because
+`normalizeCode` hard-requires exactly 8, an invite code can never be mistaken for a judge
+code by the sign-in page. They get a **separate `INVITE_CODE_PEPPER`**, so rotating
+`JUDGE_CODE_PEPPER` — documented as invalidating every judge code — does not also silently
+void every outstanding invite. Redemption throttling reuses `isRateLimited` verbatim;
+`login_attempts.code_hash` is plain text with no FK, so it buckets invite hashes with no
+schema change.
+
+`scripts/bootstrap-admin.ts` replaces README step 4's raw SQL, which now creates an admin
+with no org. First-signup-wins is explicitly rejected (D8): it is a race on a public URL
+and a permanent footgun if the table is ever truncated.
+
+<Callout id="signup-tradeoff" tone="info">
+
+**Stated tradeoff.** Anyone with the anon key can still call `supabase.auth.signUp` and
+create an `auth.users` row. That grants **nothing** — the membership row is the grant.
+Closing it would mean either a service-role key in the Vercel environment or an edge
+captcha, neither of which is worth it. The required email match on invites means a junk
+account still cannot redeem someone else's code.
+
+</Callout>
+
+## Phase 6 — Tests · **shipped alongside Phase 2**
+
+D1 and D2 make the existing PGlite harness sufficient: `memberships` is portable and
+membership is the grant, so every tenancy predicate is executable under it.
+
+`tests/schema.test.ts` gains `0006_organisations` and an org in its fixture. Leave its
+assertions alone — them passing unchanged is the proof that adding `org_id` disturbed
+none of the scoring math or `save_submission`.
+
+`tests/tenancy.test.ts` is new: two orgs, two admin uuids, an event each. For each string
+in `lib/sql/scoped.ts`, run it with the **wrong** admin id and assert zero rows *and that
+the target row is unchanged*; then with the right id and assert one row. Six mutations,
+two directions each. Plus slug uniqueness per org, the invite single-use / expiry /
+email-mismatch branches, and a re-assertion that `save_submission` still refuses a
+cross-event poster with two orgs in play.
+
+`tests/actions-scoped.test.ts` is a lint rule in test's clothing: read
+`app/actions/admin.ts` as text, extract every exported async function, and assert each
+body calls into `lib/services/`. Extend the same trick to `app/api/**/route.ts` — every
+exported `GET`/`POST`/`PATCH`/`PUT`/`DELETE` must reach a service function, and every
+mutating one must also call `requireSameOrigin`. It is the only thing that stops someone
+adding a nineteenth unscoped action, or a route handler that queries the database
+directly, six months from now — which is exactly how the codebase reached its current
+state.
+
+**Corrected during implementation.** This plan assumed the service functions would be
+directly unit-testable by passing a fabricated actor. They are not: they import
+`@/lib/db`, which imports `server-only`, which throws outside a react-server context —
+the same constraint that already forces `scripts/seed.ts` to import `lib/db/client`
+instead. Adding an injectable query seam purely for tests was not worth it, because the
+SQL strings are where the ownership decision actually lives.
+
+So the coverage sits one layer lower and is stronger for it: `tests/tenancy.test.ts`
+executes the exact statements from `lib/sql/scoped.ts` against PGlite. Every denial case
+asserts both that zero rows came back **and** that the target row is unchanged — a row
+count alone would still pass if the write had gone through and simply returned nothing.
+
+`0007` is covered too, despite living in the Supabase-only lane: shimming a bare `admins`
+table into PGlite is enough to run it verbatim and prove both backfill paths and the
+foreign key. That upgrade would otherwise first execute on a live database.
+
+## Phase 7 — Scale and deploy · not started
+
+<Callout id="view-pushdown" tone="risk">
+
+**The highest-value item here, and a two-word fix per view.** `0002_views.sql` groups by
+`s.id`, `p.id` and `j.id`. `event_id` is selected via functional dependency on the primary
+key but is **not in the group-by clause**, so Postgres cannot push `where event_id = $1`
+down below the aggregation. With one event that is free. With 200 tenants, **every
+dashboard poll re-aggregates every submission on the platform.** Add the event column to
+each `group by` — semantically a no-op, since both are functionally dependent on the PK,
+but it puts `event_id` in the planner's group clause. Change no arithmetic:
+`tests/schema.test.ts` will catch you, and `lib/scoring.ts` must keep mirroring the file.
+
+</Callout>
+
+**Connection pooling.** `lib/db/client.ts` sets `max: 5` per lambda instance, and each
+Vercel instance gets its own module scope — so N warm instances means 5N connections.
+Against the transaction pooler (6543) those are cheap Supavisor client slots multiplexed
+onto a small server-side pool; against the direct connection (5432, ~60 on Free) it would
+fall over at twelve instances. The existing "use 6543" decision is what makes this
+survivable, so nobody should "simplify" it. Drop `max` to **3** and `idleTimeoutMillis`
+to **5s**; leave `connectionTimeoutMillis` and the `pool.on("error")` handler alone, since
+both are load-bearing.
+
+**The 15-second poll.** `components/auto-refresh.tsx` re-renders the whole RSC tree every
+15s — roughly four queries per tick per open dashboard. It already pauses on hidden tabs.
+Add an adaptive interval (15s while `status === 'active'`, 60s otherwise; most open
+dashboards at any moment are draft or locked, so this alone cuts steady-state load about
+fourfold) and an idle stop after ~10 minutes without interaction, since a dashboard left
+on a projector overnight currently polls 5,760 times.
+
+**Deployment.** Pin the Vercel function region to the Supabase project region — each admin
+render is 3–8 sequential round trips, so this is the single biggest latency win. Add
+`maxDuration = 30` to the CSV export route. Two new env vars (`INVITE_CODE_PEPPER`,
+`NEXT_PUBLIC_SITE_URL`) take the count from five to seven; `NEXT_PUBLIC_*` are inlined at
+build, so changing Supabase projects is a rebuild rather than an env edit. Set
+`statement_timeout` for the app role as an **ops step, not a migration** — `npm run
+migrate` runs DDL on the same role and must not inherit it. Add CI running `npm test`,
+`npm run lint` and `npm run build`; none exists today.
+
+<Callout id="cookie-secure" tone="warning">
+
+**`lib/auth/judge-session.ts` sets the judge cookie `secure: false`**, with a documented
+rationale about plain HTTP on a venue LAN. For a hosted HTTPS service that rationale no
+longer holds. Make it `secure: process.env.JUDGE_COOKIE_SECURE === "true"`, defaulting
+false so existing LAN deployments are unaffected, and set it true on Vercel. Do not simply
+flip the literal — that is precisely the regression the existing comment warns about.
+
+</Callout>
+
+## Also worth pulling forward
+
+`importPosters` splits CSV rows on a bare comma while `lib/csv.ts` writes properly quoted
+RFC 4180 and has **no parser at all**, so export then re-import corrupts every title
+containing a comma. KNOWN-ISSUES.md tracks it as a nuisance — but every new organiser's
+first action is a poster import, so it becomes "corrupts a stranger's event data on first
+use." Roughly an afternoon.
+
+CLAUDE.md's "Decisions already made" records *"the app is single-tenant by construction"*
+as deliberate, naming `getPrimaryEvent()` and the missing admin↔event link as its
+mechanism. That block becomes wrong the moment Phase 2 lands — rewrite it in the same
+commit.
+
+## Ordering
+
+<Table
+  id="ordering"
+  columns={["Phase", "Ships", "Blocks on", "Status"]}
+  rows={[
+    ["1", "orgs / memberships / invites schema + backfill", "—", "**Shipped** — 0006, 0007"],
+    ["2", "lib/services/*, getEventScope, all 18 actions rewired as thin wrappers", "1", "**Shipped** — the gate for organiser #2"],
+    ["6", "tenancy and action-scope tests", "2", "**Shipped** — 105 tests green"],
+    ["3", "REST Route Handlers, same-origin guard, OpenAPI spec", "2", "Next up"],
+    ["4", "/admin/events/[eventId] routing + picker", "2", "Not started"],
+    ["5", "invites, /admin/join, bootstrap script", "2", "Not started"],
+    ["7", "view pushdown, pool tuning, region pin, adaptive polling", "1", "Not started"]
+  ]}
+/>
+
+**Where this leaves things.** A second organiser is safe to add today, by hand. Two gaps
+stand between that and outside organisers arriving on their own: creating an account
+still means running SQL (Phase 5), and each organiser is limited to a single event
+because the UI has nowhere to put a second one (Phase 4).
+
+Ship **Phase 1 + 2 with the Phase 6 tests** as one unit. After that, adding organiser #2
+by hand via the bootstrap script is safe, and everything else is additive. The view
+pushdown in Phase 7 is a portable migration with zero app changes, so land it early even
+though it is listed late — it is not deferrable past roughly twenty events.
+
+**Do not build signup before ownership and enforcement land.** Building the door first
+ships a security incident rather than a feature.
+
+**Do not build the API before the service layer.** Route Handlers written against the
+current actions would be a second authorization path, and a second place for a check to go
+missing — which is the exact failure this whole plan exists to fix.
+
+## Verification
+
+<Checklist
+  id="verify"
+  items={[
+    { id: "v-tests", label: "`npm test` green", checked: true, note: "105 passing. Extended schema.test.ts, plus tenancy.test.ts and actions-scoped.test.ts. This is also what pins lib/scoring.ts to 0002_views.sql — the scoring assertions passing unchanged is the proof that adding org_id disturbed none of the maths." },
+    { id: "v-guard-fails", label: "The action-scope guard can actually fail", checked: true, note: "Verified by temporarily adding an unscoped action calling query() directly, confirming the suite went red, then removing it. A guard that cannot fail is worse than no guard, because it reads as coverage." },
+    { id: "v-escalation", label: "Cross-tenant code rotation refused, hash untouched", checked: true, note: "Asserts on the data, not the row count: a denial that still overwrote code_hash would lock the victim's judges out just as effectively." },
+    { id: "v-0007", label: "0007 applies, backfills, and enforces its FK", checked: true, note: "Covered by shimming a bare admins table into PGlite, so the Supabase-only lane is tested rather than first executed against a live database." },
+    { id: "v-slug", label: "Same event slug succeeds under two orgs, fails twice under one", checked: true, note: "Proves D3 landed." },
+    { id: "v-build", label: "`npm run build`, `npx tsc --noEmit` and `npm run lint` clean", checked: true },
+    { id: "v-migrate", label: "`npm run migrate` then `npm run seed` against a scratch Supabase project", note: "Not yet done — needs a real project. Confirm no event has a null org_id and every existing admin came out of 0007 with an owner membership." },
+    { id: "v-crosstenant-manual", label: "Two-organiser manual test through the running app", note: "Not yet done. Two orgs, an event each. Signed in as A, POST all six child-id actions and regenerateAllCodes with B's ids; every one refused, B's code_hint values unchanged. The SQL is covered by tests, but the wiring from action to service is not." },
+    { id: "v-judge", label: "Judge flow unchanged on a real phone", note: "Not yet done. Seed, sign in with a printed code, score a poster, kill wifi mid-submit, confirm the outbox replays and does not double-count. Nothing in Phases 1-2 touched this path, which is exactly why it is worth confirming." },
+    { id: "v-api-crosstenant", label: "Cross-tenant denial over HTTP, not just over actions", note: "Phase 3. Every mutating endpoint must return 404 for another org's ids — never 403, which would confirm the resource exists." },
+    { id: "v-csrf", label: "Same-origin guard actually rejects", note: "Phase 3. Replay a mutating request with Sec-Fetch-Site: cross-site and confirm 403." },
+    { id: "v-put-idempotent", label: "PUT a submission twice with the same body", note: "Phase 3. Second call returns 200 and the poster's n_judges and raw_pct are unchanged." },
+    { id: "v-openapi", label: "Every route has an OpenAPI entry", note: "Phase 3. The spec-coverage test fails if a route.ts exports a method the spec does not document." },
+    { id: "v-deploy", label: "Deploy to Vercel and repeat the cross-tenant and judge checks against the live URL", note: "Phase 7." }
+  ]}
+/>
+
+### Open Questions
+
+<QuestionForm
+  id="open-questions"
+  questions={[
+    {
+      id: "routing-in-first-release",
+      title: "Ship the URL restructure (2b) in the first release, or defer it?",
+      subtitle: "Phase 1 + 2a already make a second organiser safe. 2b is what lets one organiser hold two events.",
+      mode: "single",
+      options: [
+        { id: "defer", label: "Defer 2b", detail: "Smallest safe release. One event per organiser until someone actually needs a second.", recommended: true },
+        { id: "include", label: "Include 2b now", detail: "Bigger diff and the revalidatePath trap, but avoids a second round of route churn later." }
+      ],
+      required: true
+    },
+    {
+      id: "quotas",
+      title: "What per-org limits should the first release enforce?",
+      subtitle: "Invite-gating bounds who gets in, but not what one account can create once inside.",
+      mode: "single",
+      options: [
+        { id: "conservative", label: "Conservative", detail: "3 events per org, 300 posters and 60 judges per event. Raise on request.", recommended: true },
+        { id: "generous", label: "Generous", detail: "20 events per org, 2000 posters per event. Effectively only stops runaway scripts." },
+        { id: "none", label: "None yet", detail: "Rely on invite-gating alone and add caps when someone hits a problem." }
+      ],
+      required: true
+    },
+    {
+      id: "composite-fks",
+      title: "Add composite FKs on assignments and submissions now, or defer?",
+      subtitle: "`assignments.event_id` and `submissions.event_id` are denormalised with no composite FK, so a cross-event row is insertable at schema level. save_submission re-derives the event, so this is defence in depth.",
+      mode: "single",
+      options: [
+        { id: "defer-fks", label: "Defer", detail: "Not needed for a safe second organiser. Land it once the tenancy work is stable.", recommended: true },
+        { id: "now-fks", label: "Add in Phase 1", detail: "Needs unique (id, event_id) on posters and judges first. Turns a bug class into an impossibility while you are already in the schema." }
+      ],
+      required: false
+    },
+    {
+      id: "ui-over-api",
+      title: "Should the admin UI eventually move onto the REST API, or stay on Server Actions?",
+      subtitle: "Both call the same services either way, so this is about transport ergonomics, not correctness. It does not need deciding now — but it decides whether the API is a first-class path or a side door.",
+      mode: "single",
+      options: [
+        { id: "stay-actions", label: "UI stays on Server Actions", detail: "Keeps revalidatePath, progressive enhancement, and zero fetch plumbing. The API is for external and scripted use.", recommended: true },
+        { id: "migrate-ui", label: "Migrate the UI to fetch()", detail: "Guarantees the API is exercised by real traffic and cannot rot. Costs a rewrite of five admin panels plus manual cache invalidation." },
+        { id: "decide-later", label: "Revisit after Phase 3", detail: "Build the endpoints, then judge from real usage whether the actions are still pulling their weight." }
+      ],
+      required: false
+    },
+    {
+      id: "domain",
+      title: "What should the public URL be?",
+      subtitle: "Needed for NEXT_PUBLIC_SITE_URL, the Supabase redirect allowlist, and the invite confirmation email.",
+      mode: "freeform",
+      placeholder: "e.g. posterjudging.app, or a subdomain you already own..."
+    }
+  ]}
+  submitLabel="Send answers"
+/>

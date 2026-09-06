@@ -4,9 +4,9 @@ import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/auth/admin";
 import {
   getCriteria,
-  getPoster,
+  getEventById,
+  getOwnedPoster,
   getPosterSheets,
-  getPrimaryEvent,
 } from "@/lib/data/admin";
 
 export const dynamic = "force-dynamic";
@@ -14,15 +14,20 @@ export const dynamic = "force-dynamic";
 export default async function PosterDetailPage({
   params,
 }: PageProps<"/admin/poster/[posterId]">) {
-  await requireAdmin();
+  const admin = await requireAdmin();
   const { posterId } = await params;
 
-  const [poster, event] = await Promise.all([getPoster(posterId), getPrimaryEvent()]);
+  // Scoped by admin, not by "the one global event": this page used to load any poster
+  // by id and then trust `poster.event_id` for everything below it, which handed over
+  // another organiser's per-judge scores and comments to anyone who could guess a UUID.
+  const poster = await getOwnedPoster(posterId, admin.id);
   if (!poster) notFound();
 
-  const [criteria, sheets] = await Promise.all([
+  // Safe to trust poster.event_id now — the poster itself was proven owned.
+  const [event, criteria, sheets] = await Promise.all([
+    getEventById(poster.event_id),
     getCriteria(poster.event_id),
-    getPosterSheets(posterId),
+    getPosterSheets(posterId, admin.id),
   ]);
 
   const scored = sheets.filter((s) => s.pct !== null);

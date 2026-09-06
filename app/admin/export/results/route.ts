@@ -3,7 +3,7 @@ import { csvResponse, toCsv } from "@/lib/csv";
 import { query } from "@/lib/db";
 import {
   getCriteria,
-  getPrimaryEvent,
+  getPrimaryEventForAdmin,
   getResults,
 } from "@/lib/data/admin";
 
@@ -22,7 +22,9 @@ export async function GET(request: Request) {
   const admin = await getAdmin();
   if (!admin) return new Response("Unauthorized", { status: 401 });
 
-  const event = await getPrimaryEvent();
+  // Scoped to the caller: this used to export whichever event happened to be active
+  // platform-wide, which for a second organiser meant someone else's results.
+  const event = await getPrimaryEventForAdmin(admin.id);
   if (!event) return new Response("No event", { status: 404 });
 
   const type = new URL(request.url).searchParams.get("type");

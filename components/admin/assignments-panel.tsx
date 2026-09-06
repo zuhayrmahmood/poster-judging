@@ -83,7 +83,10 @@ export function AssignmentsPanel({
                       if (confirm("Remove every assignment for this event?")) {
                         setError(null);
                         setNotice(null);
-                        startTransition(() => clearAssignments(eventId));
+                        startTransition(async () => {
+                          const result = await clearAssignments(eventId);
+                          if (result.error) setError(result.error);
+                        });
                       }
                     }}
                     className="rounded-lg border border-line px-3 py-2 text-sm font-medium text-muted hover:text-ink disabled:opacity-40"

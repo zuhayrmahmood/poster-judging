@@ -167,11 +167,16 @@ export function JudgesManager({
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        startTransition(() =>
-                          setJudgeActive(judge.judge_id, !judge.active),
-                        )
-                      }
+                      onClick={() => {
+                        setError(null);
+                        startTransition(async () => {
+                          const result = await setJudgeActive(
+                            judge.judge_id,
+                            !judge.active,
+                          );
+                          if (result.error) setError(result.error);
+                        });
+                      }}
                       disabled={pending}
                       className="rounded-md px-2 py-1 text-xs font-medium text-muted hover:bg-surface-sunk hover:text-ink"
                     >
@@ -185,7 +190,11 @@ export function JudgesManager({
                             `Delete ${judge.name}? Their submitted scores are deleted too.`,
                           )
                         ) {
-                          startTransition(() => deleteJudge(judge.judge_id));
+                          setError(null);
+                          startTransition(async () => {
+                            const result = await deleteJudge(judge.judge_id);
+                            if (result.error) setError(result.error);
+                          });
                         }
                       }}
                       className="rounded-md px-2 py-1 text-xs font-medium text-danger hover:bg-danger-soft"

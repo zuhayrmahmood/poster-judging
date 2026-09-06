@@ -55,6 +55,8 @@ DDL in a single transaction is what transaction-mode pooling is worst at.
 0003_save_submission.sql         atomic score save
 0004_supabase_auth.sql           admins table, privilege revokes
 0005_login_attempts_by_code.sql  re-key throttling from IP to code
+0006_organisations.sql           organisations, memberships, invites, events.org_id
+0007_org_membership.sql          the FKs onto `admins`, and backfill
 ```
 
 **Upgrading a project that predates this runner?** It has the schema but no bookkeeping
@@ -76,15 +78,31 @@ Authenticating with Supabase is not enough — a row in `admins` is what grants 
 
 1. Supabase dashboard → **Authentication → Users → Add user** (email + password,
    auto-confirm).
-2. SQL Editor:
+2. SQL Editor — an `admins` row says who you are, and a `memberships` row is what
+   actually grants access to anything:
 
    ```sql
    insert into admins (id, email, name)
    select id, email, 'Your Name' from auth.users where email = 'you@example.com';
+
+   insert into organisations (name, slug)
+   values ('Your Organisation', 'your-organisation')
+   on conflict (slug) do nothing;
+
+   insert into memberships (org_id, admin_id, role)
+   select o.id, a.id, 'owner'
+     from organisations o, admins a
+    where o.slug = 'your-organisation' and a.email = 'you@example.com';
    ```
 
-This is the most common setup snag: without that row, `/admin` bounces straight back to
-the login page even though sign-in succeeded.
+This is the most common setup snag: without the `admins` row, `/admin` bounces straight
+back to the login page even though sign-in succeeded. Without the `memberships` row you
+get in, but every event is invisible — membership is the grant, so an organiser with no
+membership owns nothing.
+
+Events belong to organisations, and organisers only ever see their own. Two people
+running two events on one deployment cannot read or touch each other's posters, judges,
+rubric or results.
 
 ### 5. Run it
 

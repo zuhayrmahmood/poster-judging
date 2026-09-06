@@ -4,15 +4,15 @@ import {
 } from "@/components/admin/assignments-panel";
 import { autoAssign, loadPerJudge } from "@/lib/assign";
 import { requireAdmin } from "@/lib/auth/admin";
-import { getPosters, getPrimaryEvent } from "@/lib/data/admin";
+import { getPosters, getPrimaryEventForAdmin } from "@/lib/data/admin";
 import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export default async function AssignmentsPage() {
-  await requireAdmin();
+  const admin = await requireAdmin();
 
-  const event = await getPrimaryEvent();
+  const event = await getPrimaryEventForAdmin(admin.id);
   if (!event) {
     return (
       <p className="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-muted">
