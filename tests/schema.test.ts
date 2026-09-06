@@ -19,14 +19,15 @@ import type { Criterion } from "@/lib/types";
  * a replayed submission must overwrite rather than double-count.
  */
 
-// 0004 is deliberately absent: it needs Supabase's `auth` schema and its anon /
-// authenticated roles, neither of which exists here. Every other migration is portable
-// and belongs in this list, so the fixture keeps matching the real schema.
+// 0004 and 0007 are deliberately absent: they need Supabase's `auth` schema and its
+// anon / authenticated roles, neither of which exists here. Every other migration is
+// portable and belongs in this list, so the fixture keeps matching the real schema.
 const MIGRATIONS = [
   "0001_init",
   "0002_views",
   "0003_save_submission",
   "0005_login_attempts_by_code",
+  "0006_organisations",
 ];
 
 const RUBRIC: Array<{ label: string; weight: number; max: number }> = [
@@ -61,8 +62,16 @@ before(async () => {
     await db.exec(readFileSync(`supabase/migrations/${name}.sql`, "utf8"));
   }
 
+  // 0006 only creates the bootstrap org when events already exist, and this database
+  // starts empty — so the fixture supplies its own.
+  const org = await db.query<{ id: string }>(
+    "insert into organisations (name, slug) values ('Fixture org','fixture-org') returning id",
+  );
+
   const ev = await db.query<{ id: string }>(
-    "insert into events (name, slug, status) values ('Fixture','fixture','active') returning id",
+    `insert into events (org_id, name, slug, status)
+     values ($1, 'Fixture', 'fixture', 'active') returning id`,
+    [org.rows[0].id],
   );
   eventId = ev.rows[0].id;
 
@@ -286,8 +295,14 @@ describe("save_submission", () => {
   });
 
   it("refuses a poster from another event", async () => {
+    // A different org as well as a different event, which is the shape this actually
+    // guards against once more than one organiser exists.
+    const otherOrg = await db.query<{ id: string }>(
+      "insert into organisations (name, slug) values ('Other org','other-org') returning id",
+    );
     const other = await db.query<{ id: string }>(
-      "insert into events (name, slug) values ('Other','other') returning id",
+      `insert into events (org_id, name, slug) values ($1,'Other','other') returning id`,
+      [otherOrg.rows[0].id],
     );
     const foreign = await db.query<{ id: string }>(
       "insert into posters (event_id, code, title) values ($1,'X1','Foreign') returning id",
