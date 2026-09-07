@@ -119,6 +119,13 @@ To try it on a real phone, `npm run dev -- --hostname 0.0.0.0` and browse to you
 machine's LAN address. Emulators hide the two things that actually matter: real
 tap-target size and one-handed reach.
 
+That LAN address only works because `allowedDevOrigins` in `next.config.ts` lists the
+private IP ranges. Next 16 otherwise serves dev-only assets to `localhost` alone, and
+the failure is quiet and misleading: the page renders fine, but React never hydrates,
+so the sign-in button stays greyed out no matter what code you type. If you test from a
+subnet outside `192.168.*.*`, `10.*.*.*` or `172.16.*.*`, add it there. Production
+(`next start`) ignores the setting entirely.
+
 ## Running an event
 
 1. **Settings** — create the event, set judges per poster.
