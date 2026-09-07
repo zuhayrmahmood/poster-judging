@@ -75,6 +75,36 @@ export async function runAutoAssign(
   return ok({ count: plan.length });
 }
 
+export type AssignmentRow = {
+  judge_id: string;
+  judge_name: string;
+  poster_id: string;
+  poster_code: string;
+  sort_order: number;
+};
+
+/** The current plan, in each judge's walking order. */
+export async function listAssignments(
+  actor: Actor,
+  eventId: string,
+): Promise<ServiceResult<AssignmentRow[]>> {
+  const scope = await getEventScope(actor, eventId);
+  if (!scope) return notFound();
+
+  return ok(
+    await query<AssignmentRow>(
+      `select a.judge_id, j.name as judge_name,
+              a.poster_id, p.code as poster_code, a.sort_order
+         from assignments a
+         join judges j on j.id = a.judge_id
+         join posters p on p.id = a.poster_id
+        where a.event_id = $1
+        order by j.name, a.sort_order`,
+      [eventId],
+    ),
+  );
+}
+
 export async function clearAssignments(
   actor: Actor,
   eventId: string,

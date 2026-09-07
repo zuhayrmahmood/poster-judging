@@ -11,8 +11,9 @@ import {
   signJudgeToken,
 } from "@/lib/auth/judge-session";
 import { isRateLimited, recordFailedAttempt } from "@/lib/auth/rate-limit";
-import { one, query } from "@/lib/db";
+import { one } from "@/lib/db";
 import { env } from "@/lib/env";
+import * as submissions from "@/lib/services/submissions";
 
 /**
  * Server Actions are reachable by direct POST, not only through the UI, so every one of
@@ -90,30 +91,17 @@ async function save(
   const session = await getJudgeSession();
   if (!session) return { ok: false, error: "Your session expired. Sign in again." };
 
-  // save_submission re-verifies that the poster belongs to this judge's event and that
-  // the event is still active, and does the write atomically.
-  try {
-    await query("select save_submission($1, $2, $3, $4, $5::jsonb)", [
-      session.judgeId,
-      posterId,
-      status,
-      comment,
-      JSON.stringify(scores),
-    ]);
-  } catch (error) {
-    // The function raises these with errcode P0001; Postgres puts the raised message in
-    // the error text, so matching on it is the same contract as before.
-    const known: Record<string, string> = {
-      event_not_active: "Judging has closed for this event.",
-      poster_not_in_event: "That poster isn't part of your event.",
-      judge_not_found: "Your judge account is no longer active.",
-    };
-    const text = error instanceof Error ? error.message : String(error);
-    const match = Object.keys(known).find((key) => text.includes(key));
-    return { ok: false, error: match ? known[match] : "Couldn't save. Try again." };
-  }
+  // The write itself, its error contract, and the SQL-side event check all live in the
+  // service, so the REST transport shares them rather than reimplementing them.
+  const result = await submissions.saveSubmission(
+    session,
+    posterId,
+    scores,
+    comment,
+    status,
+  );
 
-  return { ok: true };
+  return result.ok ? { ok: true } : { ok: false, error: result.message };
 }
 
 export async function saveDraft(

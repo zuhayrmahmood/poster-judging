@@ -10,11 +10,13 @@ get wrong.
 
 ## Shape of the app
 
-There is **no HTTP API**. The backend is three things fused into the Next.js process:
+The backend has **two transports over one service layer**:
 
+- `app/api/**/route.ts` — 28 REST Route Handlers. Same-origin only, cookie-authenticated,
+  documented in `openapi.json` and served at `/api/openapi.json`.
 - `app/actions/*.ts` — 22 Server Actions (18 admin, 4 judge). Client components import
-  them as functions, not URLs. The admin ones are **thin transport wrappers**: resolve
-  the caller, call a service, `revalidatePath`. No authorization logic lives here.
+  them as functions, not URLs. Both transports are **thin adapters**: resolve the caller,
+  call a service, map the result. No authorization logic lives in either.
 - `lib/services/*.ts` — where authorization, validation and SQL actually live. Each
   function takes an explicit actor and returns `ServiceResult`, and never touches
   cookies, `redirect()` or `revalidatePath()`. That split is what lets a second
@@ -29,8 +31,16 @@ There is **no HTTP API**. The backend is three things fused into the Next.js pro
   atomic writes + authorization in `save_submission` (`0003`). Prefer changing SQL over
   reimplementing it in TypeScript.
 
-Client components never fetch. They take server-rendered props and call actions.
-The one exception is `admin-login-form.tsx`, which talks to Supabase auth directly.
+Client components never fetch. They take server-rendered props and call actions; the
+REST API exists for scripted and external use, not for the app's own UI. The one
+exception is `admin-login-form.tsx`, which talks to Supabase auth directly.
+
+**Route Handlers get no CSRF protection.** Next validates `Origin` for Server Action
+invocations but not for Route Handlers, so every mutating handler calls
+`requireSameOrigin()` from `lib/http/guards.ts`. `tests/api-contract.test.ts` fails if one
+forgets. Handlers must also never call `requireAdmin()`/`requireEventScope()` — those
+throw navigation signals meant for rendering, and surface as an opaque 500 on an API
+route; use `resolveAdmin()`/`resolveJudge()`, which return null.
 
 `proxy.ts` is Next 16's rename of `middleware.ts`. It is a **first-pass redirect, not the
 security boundary** — Server Actions and Route Handlers are reachable by direct POST/GET,
@@ -117,7 +127,15 @@ Three things here look like bugs and are not:
   through to `memberships` and the caller reads `rows.length === 0` as denial.
 - **"Not found" and "not yours" are deliberately the same answer.** Distinguishing them
   turns the id space into an oracle for other organisers' events. Services return
-  `not_found` for both; pages `notFound()`, and any future API must return 404, not 403.
+  `not_found` for both; pages `notFound()`, and the API returns **404, never 403**.
+- **`PUT /api/events/{id}/submissions/{posterId}` is idempotent by construction**, not by
+  convention: `save_submission` upserts on `(judge, poster)` and replaces child rows
+  wholesale. That is the same property the offline outbox depends on. Don't break either
+  without breaking both.
+- **The API is unversioned while it is browser-only.** The first external consumer earns
+  `/api/v1`; adding it later is a directory move plus a rewrite rule. Bearer tokens are
+  deferred — when they land, token-authenticated requests skip the same-origin check,
+  because a token is never attached to a request ambiently.
 - **`memberships` lives in the portable migration lane** (`0006`) with a bare
   `admin_id uuid`; the FK to `admins` is added in `0007`, the Supabase-only lane. That
   is the only reason the tenancy predicates are testable under PGlite — do not "tidy"

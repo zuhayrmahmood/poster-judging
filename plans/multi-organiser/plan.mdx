@@ -22,15 +22,16 @@ The judge experience does not change at all. Judges keep typing an 8-character c
 
 <Callout id="status" tone="success">
 
-**Phases 1 and 2 are implemented** on branch `multi-tenant-phases-1-2` — 105 tests
-passing, typecheck, lint and build clean. A second organiser is now safe to add.
-Ownership exists in the schema, every admin action is scoped through the service layer,
-and the poster-detail IDOR is closed. What remains before outside organisers can arrive
-on their own is Phase 5: creating an account still means running SQL by hand.
+**Phases 1, 2 and 3 are implemented** on branch `multi-tenant-phases-1-2` — 211 tests
+passing, typecheck, lint and build clean. A second organiser is safe to add, and all 28
+REST endpoints are live and documented at `/api/openapi.json`. What remains before
+outside organisers can arrive on their own is Phase 5: creating an account still means
+running SQL by hand.
 
-Each phase below carries its own status. Two things landed differently from the original
-design, both noted in place: `org_invites` shipped early in `0006`, and the service layer
-turned out **not** to be unit-testable the way this plan assumed.
+Each phase below carries its own status. Three things landed differently from the
+original design, all noted in place: `org_invites` shipped early in `0006`, the service
+layer turned out **not** to be unit-testable the way this plan assumed, and one endpoint
+became `PUT` where the plan said `PATCH`.
 
 </Callout>
 
@@ -432,7 +433,7 @@ While here, `createJudge` and `regenerateAllCodes` gain retry-on-`23505` for
 `judges_code_hash_key` (D9). A collision in a global code space is rare but today
 surfaces as a bare "Couldn't add that judge."
 
-## Phase 3 — The REST API · next up
+## Phase 3 — The REST API · **shipped**
 
 Once the services exist, a Route Handler is a transport adapter and nothing more: resolve
 the actor, parse the body, call the service, map the result to a status code. No
@@ -719,8 +720,20 @@ attached to requests, so there is no CSRF surface to defend.
 
 An OpenAPI 3 document lives at `openapi.json`, is served from `/api/openapi.json`, and is
 covered by a test asserting every `app/api/**/route.ts` exported method has a matching
-spec entry — the same trick as the action-scope test, so the docs cannot silently drift
-from the routes.
+spec entry — and, in the other direction, that the spec documents nothing unimplemented.
+The same test fails a mutating handler that omits `requireSameOrigin`, or any handler
+that reaches the database instead of a service. Both directions were confirmed to go red
+against deliberate regressions before being kept.
+
+**Shipped differently:** replacing a criterion became `PUT
+/api/events/{eventId}/criteria/{criterionId}` rather than `PATCH`. The existing service
+takes a whole criterion, and the rubric UI always sends every field, so the request
+replaces the resource rather than merging into it — which is what `PUT` means. `PATCH`
+would have advertised partial updates the service cannot perform.
+
+**Also worth knowing:** the same-origin guard runs *before* the session check, so a
+cross-site probe gets 403 without learning whether a session exists. Verified against a
+running server alongside the 401 and 404 paths.
 
 ## Phase 4 — Event id in the URL · not started
 
@@ -918,17 +931,18 @@ commit.
     ["1", "orgs / memberships / invites schema + backfill", "—", "**Shipped** — 0006, 0007"],
     ["2", "lib/services/*, getEventScope, all 18 actions rewired as thin wrappers", "1", "**Shipped** — the gate for organiser #2"],
     ["6", "tenancy and action-scope tests", "2", "**Shipped** — 105 tests green"],
-    ["3", "REST Route Handlers, same-origin guard, OpenAPI spec", "2", "Next up"],
+    ["3", "REST Route Handlers, same-origin guard, OpenAPI spec", "2", "**Shipped** — 28 endpoints"],
     ["4", "/admin/events/[eventId] routing + picker", "2", "Not started"],
     ["5", "invites, /admin/join, bootstrap script", "2", "Not started"],
     ["7", "view pushdown, pool tuning, region pin, adaptive polling", "1", "Not started"]
   ]}
 />
 
-**Where this leaves things.** A second organiser is safe to add today, by hand. Two gaps
-stand between that and outside organisers arriving on their own: creating an account
-still means running SQL (Phase 5), and each organiser is limited to a single event
-because the UI has nowhere to put a second one (Phase 4).
+**Where this leaves things.** A second organiser is safe to add today, by hand, and can
+drive everything over REST. Two gaps stand between that and outside organisers arriving
+on their own: creating an account still means running SQL (Phase 5), and each organiser
+is limited to a single event because the *UI* has nowhere to put a second one — the API
+already handles many events per org, so Phase 4 is now UI-only work.
 
 Ship **Phase 1 + 2 with the Phase 6 tests** as one unit. After that, adding organiser #2
 by hand via the bootstrap script is safe, and everything else is additive. The view
@@ -956,10 +970,10 @@ missing — which is the exact failure this whole plan exists to fix.
     { id: "v-migrate", label: "`npm run migrate` then `npm run seed` against a scratch Supabase project", note: "Not yet done — needs a real project. Confirm no event has a null org_id and every existing admin came out of 0007 with an owner membership." },
     { id: "v-crosstenant-manual", label: "Two-organiser manual test through the running app", note: "Not yet done. Two orgs, an event each. Signed in as A, POST all six child-id actions and regenerateAllCodes with B's ids; every one refused, B's code_hint values unchanged. The SQL is covered by tests, but the wiring from action to service is not." },
     { id: "v-judge", label: "Judge flow unchanged on a real phone", note: "Not yet done. Seed, sign in with a printed code, score a poster, kill wifi mid-submit, confirm the outbox replays and does not double-count. Nothing in Phases 1-2 touched this path, which is exactly why it is worth confirming." },
-    { id: "v-api-crosstenant", label: "Cross-tenant denial over HTTP, not just over actions", note: "Phase 3. Every mutating endpoint must return 404 for another org's ids — never 403, which would confirm the resource exists." },
-    { id: "v-csrf", label: "Same-origin guard actually rejects", note: "Phase 3. Replay a mutating request with Sec-Fetch-Site: cross-site and confirm 403." },
-    { id: "v-put-idempotent", label: "PUT a submission twice with the same body", note: "Phase 3. Second call returns 200 and the poster's n_judges and raw_pct are unchanged." },
-    { id: "v-openapi", label: "Every route has an OpenAPI entry", note: "Phase 3. The spec-coverage test fails if a route.ts exports a method the spec does not document." },
+    { id: "v-api-crosstenant", label: "Cross-tenant denial over HTTP, not just over actions", checked: true, note: "Enforced by the shared service layer and asserted by tests/api-contract.test.ts, which fails any handler that answers 403 for a missing or foreign resource. Still worth one manual pass with two real sessions. Every mutating endpoint must return 404 for another org's ids — never 403, which would confirm the resource exists." },
+    { id: "v-csrf", label: "Same-origin guard actually rejects", checked: true, note: "Confirmed against a running server: cross-site DELETE returns 403 before the session is even looked at, so a probe learns nothing." },
+    { id: "v-put-idempotent", label: "PUT a submission twice with the same body", note: "Not yet done — needs a seeded database and a judge cookie. The underlying upsert is covered by tests/schema.test.ts; what is unverified is the HTTP path onto it." },
+    { id: "v-openapi", label: "Every route has an OpenAPI entry", checked: true, note: "Covered in both directions, and verified to fail when an endpoint is removed from the spec." },
     { id: "v-deploy", label: "Deploy to Vercel and repeat the cross-tenant and judge checks against the live URL", note: "Phase 7." }
   ]}
 />

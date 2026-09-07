@@ -22,6 +22,41 @@ export async function listOrgs(actor: Actor) {
   }>(LIST_ORGS_FOR_ADMIN, [actor.id]);
 }
 
+/** One organisation, proven to be one the caller belongs to. */
+export async function getOrg(
+  actor: Actor,
+  orgId: string,
+): Promise<ServiceResult<{ id: string; name: string; slug: string; role: MembershipRole }>> {
+  const scope = await getOrgScope(actor, orgId);
+  if (!scope) return notFound();
+
+  return ok({
+    id: scope.orgId,
+    name: scope.name,
+    slug: scope.slug,
+    role: scope.role,
+  });
+}
+
+/** Renaming an organisation is an owner's call, not any member's. */
+export async function renameOrg(
+  actor: Actor,
+  orgId: string,
+  name: string,
+): Promise<ServiceResult<null>> {
+  const scope = await getOrgScope(actor, orgId);
+  if (!scope) return notFound();
+  // A plain member gets the same answer as a non-member: no confirmation that the org
+  // exists and they merely lack the role.
+  if (scope.role !== "owner") return notFound();
+
+  const trimmed = name.trim();
+  if (!trimmed) return fail("invalid", "Give the organisation a name.");
+
+  await query("update organisations set name = $1 where id = $2", [trimmed, orgId]);
+  return ok(null);
+}
+
 /** Every event the caller can reach, across all their organisations. */
 export async function listEvents(actor: Actor): Promise<Event[]> {
   return query<Event>(LIST_EVENTS_FOR_ADMIN, [actor.id]);
@@ -115,6 +150,69 @@ export async function setStatus(
 
   await query("update events set status = $1 where id = $2", [status, eventId]);
   return ok(null);
+}
+
+/**
+ * The PATCH shape: any subset of the mutable fields, applied in one pass.
+ *
+ * Opening and closing judging is a status field, so it belongs here rather than behind
+ * `/open` and `/close` action endpoints — the state is the resource's, not a verb.
+ */
+export type EventPatch = {
+  name?: string;
+  status?: EventStatus;
+  target_judges_per_poster?: number;
+};
+
+export async function updateEvent(
+  actor: Actor,
+  eventId: string,
+  patch: EventPatch,
+): Promise<ServiceResult<Event>> {
+  const scope = await getEventScope(actor, eventId);
+  if (!scope) return notFound();
+
+  if (patch.name !== undefined && !patch.name.trim()) {
+    return fail("invalid", "Give the event a name.");
+  }
+  if (patch.status !== undefined && !STATUSES.includes(patch.status)) {
+    return fail("invalid", "Unknown status.");
+  }
+  if (
+    patch.target_judges_per_poster !== undefined &&
+    !Number.isFinite(patch.target_judges_per_poster)
+  ) {
+    return fail("invalid", "Give a number.");
+  }
+
+  // Build the SET list from whatever was supplied, so an absent field is left alone
+  // rather than overwritten with a default.
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (patch.name !== undefined) {
+    params.push(patch.name.trim());
+    sets.push(`name = $${params.length}`);
+  }
+  if (patch.status !== undefined) {
+    params.push(patch.status);
+    sets.push(`status = $${params.length}`);
+  }
+  if (patch.target_judges_per_poster !== undefined) {
+    params.push(
+      Math.max(1, Math.min(20, Math.round(patch.target_judges_per_poster))),
+    );
+    sets.push(`target_judges_per_poster = $${params.length}`);
+  }
+
+  if (sets.length === 0) return fail("invalid", "Nothing to update.");
+
+  params.push(eventId);
+  const event = await one<Event>(
+    `update events set ${sets.join(", ")} where id = $${params.length} returning *`,
+    params,
+  );
+  return event ? ok(event) : notFound();
 }
 
 export async function setTargetJudges(

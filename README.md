@@ -135,6 +135,46 @@ tap-target size and one-handed reach.
    judge, which is the single most useful number during a live session.
 8. **Settings → Close judging** when the session ends, then export CSV.
 
+## The API
+
+Every resource is reachable over REST as well as through the app's own UI. The spec is
+`openapi.json`, served at `/api/openapi.json`.
+
+```
+GET    /api/orgs                                     organisations you belong to
+GET    /api/orgs/{orgId}/events                      events in one
+POST   /api/orgs/{orgId}/events                      create an event
+GET    /api/events/{eventId}                         one event
+PATCH  /api/events/{eventId}                         rename, retarget, open/close judging
+GET    /api/events/{eventId}/posters                 list, create, import, delete
+POST   /api/events/{eventId}/posters/import          bulk CSV (text/csv body)
+GET    /api/events/{eventId}/judges                  list, add, deactivate, delete
+POST   /api/events/{eventId}/judges/codes            rotate all, for the card sheet
+GET    /api/events/{eventId}/criteria                the rubric
+GET    /api/events/{eventId}/assignments             the plan
+PUT    /api/events/{eventId}/assignments             auto-assign (replaces the set)
+GET    /api/events/{eventId}/results?mode=raw        ranked results + judge progress
+PUT    /api/events/{eventId}/submissions/{posterId}  a judge saves one sheet
+```
+
+Four things to know before calling it:
+
+- **Same-origin only.** There are no API tokens yet. Admin endpoints use the Supabase
+  session cookie, the judge endpoints use `pj_judge`, and every mutating request must
+  carry `Sec-Fetch-Site: same-origin` or an `Origin` matching the host — otherwise 403.
+  Server Actions get that check from Next automatically; Route Handlers do not, so it is
+  enforced by hand.
+- **Cross-tenant access is 404, never 403.** A 403 would confirm a resource exists,
+  letting a caller probe for other organisers' ids.
+- **`PUT` on a submission is safe to replay.** The write upserts on `(judge, poster)` and
+  replaces the score rows wholesale, so a retry overwrites rather than double-counting —
+  which is exactly what the offline outbox relies on.
+- **Unjudged is not zero.** A poster nobody has scored returns null `raw_pct`/`norm_z` and
+  is unranked. Don't coerce those to 0.
+
+Opening and closing judging is `PATCH /api/events/{id}` with `{"status": "active"}` —
+there is no `/open` or `/close`, because the state belongs to the event.
+
 ## How results are computed
 
 Each criterion is normalised to a fraction of its own maximum, weighted, and summed into
