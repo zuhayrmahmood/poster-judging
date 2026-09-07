@@ -6,9 +6,43 @@
 
 export type EventStatus = "draft" | "active" | "locked";
 export type SubmissionStatus = "draft" | "submitted";
+export type MembershipRole = "owner" | "admin";
+
+export type Organisation = {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+};
+
+/**
+ * Membership is the grant: `admins` says who someone is, this says what they may touch.
+ * Authorization joins events -> memberships and never has to reach `admins`.
+ */
+export type Membership = {
+  org_id: string;
+  admin_id: string;
+  role: MembershipRole;
+  created_at: string;
+};
+
+/** `org_id` null means redeeming this invite mints a new organisation. */
+export type OrgInvite = {
+  id: string;
+  org_id: string | null;
+  email: string;
+  role: MembershipRole;
+  code_hint: string;
+  created_by: string | null;
+  expires_at: string;
+  used_at: string | null;
+  used_by: string | null;
+  created_at: string;
+};
 
 export type Event = {
   id: string;
+  org_id: string;
   name: string;
   slug: string;
   status: EventStatus;

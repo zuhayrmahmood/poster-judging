@@ -55,6 +55,8 @@ DDL in a single transaction is what transaction-mode pooling is worst at.
 0003_save_submission.sql         atomic score save
 0004_supabase_auth.sql           admins table, privilege revokes
 0005_login_attempts_by_code.sql  re-key throttling from IP to code
+0006_organisations.sql           organisations, memberships, invites, events.org_id
+0007_org_membership.sql          the FKs onto `admins`, and backfill
 ```
 
 **Upgrading a project that predates this runner?** It has the schema but no bookkeeping
@@ -76,15 +78,31 @@ Authenticating with Supabase is not enough — a row in `admins` is what grants 
 
 1. Supabase dashboard → **Authentication → Users → Add user** (email + password,
    auto-confirm).
-2. SQL Editor:
+2. SQL Editor — an `admins` row says who you are, and a `memberships` row is what
+   actually grants access to anything:
 
    ```sql
    insert into admins (id, email, name)
    select id, email, 'Your Name' from auth.users where email = 'you@example.com';
+
+   insert into organisations (name, slug)
+   values ('Your Organisation', 'your-organisation')
+   on conflict (slug) do nothing;
+
+   insert into memberships (org_id, admin_id, role)
+   select o.id, a.id, 'owner'
+     from organisations o, admins a
+    where o.slug = 'your-organisation' and a.email = 'you@example.com';
    ```
 
-This is the most common setup snag: without that row, `/admin` bounces straight back to
-the login page even though sign-in succeeded.
+This is the most common setup snag: without the `admins` row, `/admin` bounces straight
+back to the login page even though sign-in succeeded. Without the `memberships` row you
+get in, but every event is invisible — membership is the grant, so an organiser with no
+membership owns nothing.
+
+Events belong to organisations, and organisers only ever see their own. Two people
+running two events on one deployment cannot read or touch each other's posters, judges,
+rubric or results.
 
 ### 5. Run it
 
@@ -116,6 +134,46 @@ tap-target size and one-handed reach.
 7. Watch the dashboard. The **Below target** count tells you where to send the next
    judge, which is the single most useful number during a live session.
 8. **Settings → Close judging** when the session ends, then export CSV.
+
+## The API
+
+Every resource is reachable over REST as well as through the app's own UI. The spec is
+`openapi.json`, served at `/api/openapi.json`.
+
+```
+GET    /api/orgs                                     organisations you belong to
+GET    /api/orgs/{orgId}/events                      events in one
+POST   /api/orgs/{orgId}/events                      create an event
+GET    /api/events/{eventId}                         one event
+PATCH  /api/events/{eventId}                         rename, retarget, open/close judging
+GET    /api/events/{eventId}/posters                 list, create, import, delete
+POST   /api/events/{eventId}/posters/import          bulk CSV (text/csv body)
+GET    /api/events/{eventId}/judges                  list, add, deactivate, delete
+POST   /api/events/{eventId}/judges/codes            rotate all, for the card sheet
+GET    /api/events/{eventId}/criteria                the rubric
+GET    /api/events/{eventId}/assignments             the plan
+PUT    /api/events/{eventId}/assignments             auto-assign (replaces the set)
+GET    /api/events/{eventId}/results?mode=raw        ranked results + judge progress
+PUT    /api/events/{eventId}/submissions/{posterId}  a judge saves one sheet
+```
+
+Four things to know before calling it:
+
+- **Same-origin only.** There are no API tokens yet. Admin endpoints use the Supabase
+  session cookie, the judge endpoints use `pj_judge`, and every mutating request must
+  carry `Sec-Fetch-Site: same-origin` or an `Origin` matching the host — otherwise 403.
+  Server Actions get that check from Next automatically; Route Handlers do not, so it is
+  enforced by hand.
+- **Cross-tenant access is 404, never 403.** A 403 would confirm a resource exists,
+  letting a caller probe for other organisers' ids.
+- **`PUT` on a submission is safe to replay.** The write upserts on `(judge, poster)` and
+  replaces the score rows wholesale, so a retry overwrites rather than double-counting —
+  which is exactly what the offline outbox relies on.
+- **Unjudged is not zero.** A poster nobody has scored returns null `raw_pct`/`norm_z` and
+  is unranked. Don't coerce those to 0.
+
+Opening and closing judging is `PATCH /api/events/{id}` with `{"status": "active"}` —
+there is no `/open` or `/close`, because the state belongs to the event.
 
 ## How results are computed
 

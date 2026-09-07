@@ -152,7 +152,11 @@ export function PostersManager({
                           `Delete ${poster.code}? Any scores already submitted for it are deleted too.`,
                         )
                       ) {
-                        startTransition(() => deletePoster(poster.id));
+                        setError(null);
+                        startTransition(async () => {
+                          const result = await deletePoster(poster.id);
+                          if (result.error) setError(result.error);
+                        });
                       }
                     }}
                     className="rounded-md px-2 py-1 text-xs font-medium text-danger hover:bg-danger-soft"

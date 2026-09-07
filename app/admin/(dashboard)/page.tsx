@@ -2,14 +2,18 @@ import Link from "next/link";
 
 import { AutoRefresh } from "@/components/auto-refresh";
 import { requireAdmin } from "@/lib/auth/admin";
-import { getJudgeProgress, getPrimaryEvent, getResults } from "@/lib/data/admin";
+import {
+  getJudgeProgress,
+  getPrimaryEventForAdmin,
+  getResults,
+} from "@/lib/data/admin";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage({ searchParams }: PageProps<"/admin">) {
-  await requireAdmin();
+  const admin = await requireAdmin();
 
-  const event = await getPrimaryEvent();
+  const event = await getPrimaryEventForAdmin(admin.id);
   if (!event) {
     return (
       <p className="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-muted">

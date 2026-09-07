@@ -31,12 +31,30 @@ const STATUS_COPY: Record<
   },
 };
 
-export function SettingsPanel({ event }: { event: Event | null }) {
+export function SettingsPanel({
+  event,
+  orgId,
+}: {
+  event: Event | null;
+  orgId: string | null;
+}) {
   const [pending, startTransition] = useTransition();
   const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   if (!event) {
+    // Every organiser belongs to at least one organisation, so a missing orgId means
+    // the account was created without a membership — which the invite flow prevents,
+    // but a hand-inserted `admins` row does not.
+    if (!orgId) {
+      return (
+        <p className="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-muted">
+          Your account is not part of an organisation yet, so there is nothing to create
+          an event in. Ask whoever invited you to add you to theirs.
+        </p>
+      );
+    }
+
     return (
       <div className="flex flex-col gap-4">
         <h1 className="text-lg font-semibold tracking-tight">Create your event</h1>
@@ -61,7 +79,7 @@ export function SettingsPanel({ event }: { event: Event | null }) {
             disabled={pending || !newName.trim()}
             onClick={() =>
               startTransition(async () => {
-                const result = await createEvent(newName);
+                const result = await createEvent(orgId, newName);
                 if (result.error) setError(result.error);
               })
             }
@@ -82,11 +100,23 @@ export function SettingsPanel({ event }: { event: Event | null }) {
     <div className="flex flex-col gap-5">
       <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
 
+      {error ? (
+        <p role="alert" className="rounded-lg bg-danger-soft px-3 py-2.5 text-sm text-danger">
+          {error}
+        </p>
+      ) : null}
+
       <Section title="Event name">
         <NameField
           initial={event.name}
           pending={pending}
-          onSave={(name) => startTransition(() => renameEvent(event.id, name))}
+          onSave={(name) => {
+            setError(null);
+            startTransition(async () => {
+              const result = await renameEvent(event.id, name);
+              if (result.error) setError(result.error);
+            });
+          }}
         />
       </Section>
 
@@ -105,7 +135,11 @@ export function SettingsPanel({ event }: { event: Event | null }) {
                   ? "Close judging? Judges will no longer be able to change their scores."
                   : null;
               if (confirmMsg && !confirm(confirmMsg)) return;
-              startTransition(() => setEventStatus(event.id, nextStatus));
+              setError(null);
+              startTransition(async () => {
+                const result = await setEventStatus(event.id, nextStatus);
+                if (result.error) setError(result.error);
+              });
             }}
             className="shrink-0 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-ink disabled:opacity-40"
           >
@@ -122,7 +156,13 @@ export function SettingsPanel({ event }: { event: Event | null }) {
           <TargetField
             initial={event.target_judges_per_poster}
             pending={pending}
-            onSave={(value) => startTransition(() => setTargetJudges(event.id, value))}
+            onSave={(value) => {
+              setError(null);
+              startTransition(async () => {
+                const result = await setTargetJudges(event.id, value);
+                if (result.error) setError(result.error);
+              });
+            }}
           />
         </div>
       </Section>

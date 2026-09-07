@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { adminSignOut } from "@/app/actions/admin";
 import { requireAdmin } from "@/lib/auth/admin";
-import { getPrimaryEvent } from "@/lib/data/admin";
+import { getPrimaryEventForAdmin } from "@/lib/data/admin";
 
 const TABS = [
   { href: "/admin", label: "Results" },
@@ -23,7 +23,7 @@ const STATUS_STYLE: Record<string, string> = {
 // `/admin` — it wraps every admin page except `/admin/login`, which sits outside it.
 export default async function AdminLayout({ children }: LayoutProps<"/admin">) {
   const admin = await requireAdmin();
-  const event = await getPrimaryEvent();
+  const event = await getPrimaryEventForAdmin(admin.id);
 
   return (
     <>

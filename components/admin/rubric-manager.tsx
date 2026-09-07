@@ -19,6 +19,7 @@ export function RubricManager({
   hasSubmissions: boolean;
 }) {
   const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState({
     label: "",
     description: "",
@@ -38,6 +39,12 @@ export function RubricManager({
         </p>
       </div>
 
+      {error ? (
+        <p role="alert" className="rounded-lg bg-danger-soft px-3 py-2.5 text-sm text-danger">
+          {error}
+        </p>
+      ) : null}
+
       {hasSubmissions ? (
         <p className="rounded-lg bg-warning-soft px-3 py-2.5 text-sm text-warning">
           Judges have already submitted scores. Changing weights or maximums re-scores
@@ -53,12 +60,20 @@ export function RubricManager({
             criterion={criterion}
             totalWeight={totalWeight}
             pending={pending}
-            onSave={(input) =>
-              startTransition(() => updateCriterion(criterion.id, input))
-            }
+            onSave={(input) => {
+              setError(null);
+              startTransition(async () => {
+                const result = await updateCriterion(criterion.id, input);
+                if (result.error) setError(result.error);
+              });
+            }}
             onDelete={() => {
               if (confirm(`Delete “${criterion.label}”?`)) {
-                startTransition(() => deleteCriterion(criterion.id));
+                setError(null);
+                startTransition(async () => {
+                  const result = await deleteCriterion(criterion.id);
+                  if (result.error) setError(result.error);
+                });
               }
             }}
           />

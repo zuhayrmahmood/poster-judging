@@ -79,11 +79,19 @@ async function main() {
   // Cascades to posters, judges, criteria, assignments and submissions.
   await query("delete from events where slug = $1", [SLUG]);
 
+  // Events belong to an organisation now. Reuse the bootstrap org the migrations
+  // create, or make one, so seeding works on a database that has never had an event.
+  const [org] = await query<{ id: string }>(
+    `insert into organisations (name, slug) values ('Default organisation', 'default')
+     on conflict (slug) do update set slug = excluded.slug
+     returning id`,
+  );
+
   const [event] = await query<{ id: string; name: string; status: string }>(
-    `insert into events (name, slug, status, target_judges_per_poster)
-     values ($1, $2, 'active', $3)
+    `insert into events (org_id, name, slug, status, target_judges_per_poster)
+     values ($1, $2, $3, 'active', $4)
      returning id, name, status`,
-    ["Demo Research Expo", SLUG, TARGET_JUDGES_PER_POSTER],
+    [org.id, "Demo Research Expo", SLUG, TARGET_JUDGES_PER_POSTER],
   );
 
   for (const [i, c] of CRITERIA.entries()) {
