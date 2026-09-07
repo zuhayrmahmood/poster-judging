@@ -3,21 +3,16 @@ import Link from "next/link";
 
 import { signOut } from "@/app/actions/judge";
 import { PendingSyncBanner } from "@/components/pending-sync-banner";
-import { getJudgeSession } from "@/lib/auth/judge-session";
-import { getEvent, getJudge } from "@/lib/data/judge";
+import { getLiveJudgeSession } from "@/lib/data/judge";
 
 export default async function JudgeLayout({ children }: LayoutProps<"/judge">) {
-  const session = await getJudgeSession();
-  if (!session) redirect("/");
+  // Signed out, or the judge was deleted or deactivated mid-event, or the event
+  // vanished. Drop them back to sign-in rather than rendering a shell around nothing.
+  // `/` applies the same predicate, so it will render the form rather than return them.
+  const live = await getLiveJudgeSession();
+  if (!live) redirect("/");
 
-  const [judge, event] = await Promise.all([
-    getJudge(session.judgeId),
-    getEvent(session.eventId),
-  ]);
-
-  // The judge was deleted or deactivated mid-event, or the event vanished. Drop them
-  // back to sign-in rather than rendering a shell around nothing.
-  if (!judge || !judge.active || !event) redirect("/");
+  const { judge, event } = live;
 
   return (
     <>
