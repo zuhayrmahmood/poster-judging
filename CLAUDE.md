@@ -82,6 +82,14 @@ Three things here look like bugs and are not:
   the browser cannot use Realtime, so the dashboard polls (`components/auto-refresh.tsx`).
 - **Judges may score any poster in their own event**, not only assigned ones.
   Assignments are a suggested walking order. Crossing events is what's forbidden.
+- **`/` and `/judge` must share one answer to "is this judge signed in".** Both call
+  `getLiveJudgeSession()` (`lib/data/judge.ts`), which checks the database, not just the
+  cookie. The judge cookie is a self-contained 24h JWT that keeps verifying after an
+  organiser deletes or deactivates that judge, so a page gating its redirect on the raw
+  token disagrees with the other one and the two bounce the judge between them forever —
+  the phone renders neither the app nor the sign-in form that would let them recover.
+  `tests/judge-session.test.ts` fails if either page goes back to deciding for itself.
+
 - **In `score-form.tsx`, a network failure and a rejection are handled differently on
   purpose**: a thrown submit goes to the outbox and the judge moves on; a well-formed
   `ok: false` (judging closed) surfaces inline and is never queued. Don't unify them.

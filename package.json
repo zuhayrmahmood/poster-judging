@@ -12,7 +12,8 @@
     "lint": "eslint",
     "test": "node --import tsx --test tests/*.test.ts",
     "migrate": "node --env-file-if-exists=.env.local --import tsx scripts/migrate.ts",
-    "seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts"
+    "seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts",
+    "verify:tenancy": "node --env-file-if-exists=.env.local --import tsx scripts/verify-tenancy.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

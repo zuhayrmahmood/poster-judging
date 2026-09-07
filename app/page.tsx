@@ -1,11 +1,14 @@
 import { redirect } from "next/navigation";
 
 import { SignInForm } from "@/components/sign-in-form";
-import { getJudgeSession } from "@/lib/auth/judge-session";
+import { getLiveJudgeSession } from "@/lib/data/judge";
 
 export default async function SignInPage() {
   // A judge stays signed in all day; don't make them re-enter the code on every visit.
-  if (await getJudgeSession()) redirect("/judge");
+  // Checked against the database, not just the cookie: a judge deleted or deactivated
+  // mid-event still holds a verifying token, and sending them to /judge on the strength
+  // of it alone would bounce them straight back here.
+  if (await getLiveJudgeSession()) redirect("/judge");
 
   return (
     <main className="mx-auto flex w-full max-w-sm flex-1 flex-col justify-center gap-8 px-5 py-12">

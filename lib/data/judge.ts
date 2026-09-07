@@ -1,5 +1,6 @@
 import "server-only";
 
+import { getJudgeSession } from "@/lib/auth/judge-session";
 import { num, one, query } from "@/lib/db";
 import type {
   AssignmentRow,
@@ -20,6 +21,38 @@ export async function getEvent(eventId: string): Promise<Event | null> {
 
 export async function getJudge(judgeId: string): Promise<Judge | null> {
   return one<Judge>(`select ${JUDGE_COLUMNS} from judges where id = $1`, [judgeId]);
+}
+
+/**
+ * The session, but only when it still resolves to a live judge in a live event.
+ *
+ * The judge cookie is a 24h JWT, so it keeps verifying after an organiser deletes or
+ * deactivates that judge mid-event — the token is self-contained and knows nothing
+ * about the row it names. `/` and `/judge` must therefore agree about what a *usable*
+ * session is, or they bounce the judge between each other forever: `/` sees a valid
+ * token and redirects to `/judge`, `/judge` fails its own lookup and redirects back.
+ *
+ * Sharing one predicate is what makes that loop unrepresentable. Do not re-derive this
+ * check in either page.
+ *
+ * The stale cookie is deliberately left in place: a Server Component cannot write
+ * cookies during render, and it grants nothing now that both ends re-check the
+ * database. Signing in again overwrites it.
+ */
+export async function getLiveJudgeSession(): Promise<{
+  judge: Judge;
+  event: Event;
+} | null> {
+  const session = await getJudgeSession();
+  if (!session) return null;
+
+  const [judge, event] = await Promise.all([
+    getJudge(session.judgeId),
+    getEvent(session.eventId),
+  ]);
+
+  if (!judge || !judge.active || !event) return null;
+  return { judge, event };
 }
 
 export async function getCriteria(eventId: string): Promise<Criterion[]> {
