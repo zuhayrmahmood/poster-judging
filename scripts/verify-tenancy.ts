@@ -151,10 +151,40 @@ async function main() {
   const event = await pool.query<{ id: string }>(SELECT_PRIMARY_EVENT_FOR_ADMIN, [
     adminId,
   ]);
+
   if (event.rows.length === 0) {
-    console.error("\nYou own no events, so there is nothing to test against.");
+    // Two very different situations produce no owned events, and conflating them would
+    // hide the one that matters: an empty database is fine, but events that exist and
+    // are unreachable means the backfill put them in an organisation you are not in.
+    const total = await pool.query<{ n: string }>(
+      "select count(*)::text as n from events",
+    );
+
+    if (total.rows[0].n === "0") {
+      console.log(
+        "\n  No events exist yet, so the read and write checks have nothing to run\n" +
+          "  against. The schema checks above all passed, which is the part that\n" +
+          "  confirms the migration landed.\n\n" +
+          "  Run `npm run seed` to create the demo event, then run this again.",
+      );
+      await closePool();
+      process.exit(checks.some((c) => !c.ok) ? 1 : 0);
+    }
+
+    console.error(
+      `\n  ✗ ${total.rows[0].n} events exist but none are reachable from your ` +
+        `membership.\n\n` +
+        "  That is not an empty database — it means those events belong to an\n" +
+        "  organisation you are not a member of, so the backfill in 0006/0007 did not\n" +
+        "  connect them to you. Compare `select org_id from events` against\n" +
+        "  `select org_id from memberships where admin_id = '" +
+        adminId +
+        "'`.",
+    );
+    await closePool();
     process.exit(1);
   }
+
   const eventId = event.rows[0].id;
 
   const poster = await pool.query<{ id: string }>(
