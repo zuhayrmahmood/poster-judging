@@ -13,9 +13,9 @@ export const dynamic = "force-dynamic";
 
 export default async function PosterDetailPage({
   params,
-}: PageProps<"/admin/poster/[posterId]">) {
+}: PageProps<"/admin/events/[eventId]/poster/[posterId]">) {
   const admin = await requireAdmin();
-  const { posterId } = await params;
+  const { eventId, posterId } = await params;
 
   // Scoped by admin, not by "the one global event": this page used to load any poster
   // by id and then trust `poster.event_id` for everything below it, which handed over
@@ -23,10 +23,14 @@ export default async function PosterDetailPage({
   const poster = await getOwnedPoster(posterId, admin.id);
   if (!poster) notFound();
 
-  // Safe to trust poster.event_id now — the poster itself was proven owned.
+  // The layout proved this event; getOwnedPoster proved this poster. This last check
+  // ties the two together, so a poster cannot be viewed under a *different* event's URL
+  // — same 404 as everything else, because the two cases must stay indistinguishable.
+  if (poster.event_id !== eventId) notFound();
+
   const [event, criteria, sheets] = await Promise.all([
-    getEventById(poster.event_id),
-    getCriteria(poster.event_id),
+    getEventById(eventId),
+    getCriteria(eventId),
     getPosterSheets(posterId, admin.id),
   ]);
 
@@ -42,7 +46,10 @@ export default async function PosterDetailPage({
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3">
-        <Link href="/admin" className="text-sm text-muted hover:text-ink">
+        <Link
+          href={`/admin/events/${eventId}`}
+          className="text-sm text-muted hover:text-ink"
+        >
           ← Results
         </Link>
 

@@ -113,7 +113,8 @@ npm run dev
 ```
 
 - `http://localhost:3000` — judge sign-in
-- `http://localhost:3000/admin` — organiser dashboard
+- `http://localhost:3000/admin` — organiser dashboard; sends you to your event, or to
+  the picker at `/admin/events` if you have none or several
 
 To try it on a real phone, `npm run dev -- --hostname 0.0.0.0` and browse to your
 machine's LAN address. Emulators hide the two things that actually matter: real

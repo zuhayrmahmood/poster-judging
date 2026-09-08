@@ -1,11 +1,8 @@
 import { getAdmin } from "@/lib/auth/admin";
 import { csvResponse, toCsv } from "@/lib/csv";
 import { query } from "@/lib/db";
-import {
-  getCriteria,
-  getPrimaryEventForAdmin,
-  getResults,
-} from "@/lib/data/admin";
+import { getCriteria, getEventById, getResults } from "@/lib/data/admin";
+import { getEventScope } from "@/lib/services/scope";
 
 /**
  * CSV export. `?type=raw` gives one row per judge per poster with every individual
@@ -13,7 +10,10 @@ import {
  * whole thing this app replaces, and the first question someone will ask when a result
  * looks surprising.
  */
-export async function GET(request: Request) {
+export async function GET(
+  request: Request,
+  { params }: RouteContext<"/admin/events/[eventId]/export/results">,
+) {
   // In practice proxy.ts redirects unauthenticated browser navigations here before this
   // runs, which is the right behaviour for a plain download link. This check is the
   // backstop for anything that reaches the handler without passing through the proxy;
@@ -22,10 +22,16 @@ export async function GET(request: Request) {
   const admin = await getAdmin();
   if (!admin) return new Response("Unauthorized", { status: 401 });
 
-  // Scoped to the caller: this used to export whichever event happened to be active
-  // platform-wide, which for a second organiser meant someone else's results.
-  const event = await getPrimaryEventForAdmin(admin.id);
-  if (!event) return new Response("No event", { status: 404 });
+  // A Route Handler has no layout above it, so the ownership proof the pages inherit
+  // from app/admin/events/[eventId]/layout.tsx does not reach here. This must check for
+  // itself, or the event id in the URL would export any organiser's results. 404 rather
+  // than 403, so "not yours" and "no such event" stay indistinguishable.
+  const { eventId } = await params;
+  const scope = await getEventScope(admin, eventId);
+  if (!scope) return new Response("Not found", { status: 404 });
+
+  const event = await getEventById(eventId);
+  if (!event) return new Response("Not found", { status: 404 });
 
   const type = new URL(request.url).searchParams.get("type");
   const stamp = new Date().toISOString().slice(0, 10);

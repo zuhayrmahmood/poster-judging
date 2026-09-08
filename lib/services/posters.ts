@@ -79,13 +79,14 @@ export async function createPoster(
 export async function deletePoster(
   actor: Actor,
   posterId: string,
-): Promise<ServiceResult<null>> {
+): Promise<ServiceResult<{ eventId: string }>> {
   if (!isUuid(posterId)) return notFound();
 
   // Ownership is a join inside the DELETE, so there is no window between checking and
-  // deleting, and no second round trip.
-  const rows = await query<{ id: string }>(DELETE_OWNED_POSTER, [posterId, actor.id]);
-  return rows.length === 0 ? notFound() : ok(null);
+  // deleting, and no second round trip. The event comes back so the caller can
+  // revalidate its route without being told which event to trust.
+  const rows = await query<{ id: string; event_id: string }>(DELETE_OWNED_POSTER, [posterId, actor.id]);
+  return rows.length === 0 ? notFound() : ok({ eventId: rows[0].event_id });
 }
 
 /**

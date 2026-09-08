@@ -22,7 +22,7 @@ The judge experience does not change at all. Judges keep typing an 8-character c
 
 <Callout id="status" tone="success">
 
-**Phases 1, 2 and 3 are implemented** on branch `multi-tenant-phases-1-2` — 211 tests
+**Phases 1, 2, 3 and 4 are implemented** — 221 tests
 passing, typecheck, lint and build clean. A second organiser is safe to add, and all 28
 REST endpoints are live and documented at `/api/openapi.json`. What remains before
 outside organisers can arrive on their own is Phase 5: creating an account still means
@@ -735,7 +735,7 @@ would have advertised partial updates the service cannot perform.
 cross-site probe gets 403 without learning whether a session exists. Verified against a
 running server alongside the 401 and 404 paths.
 
-## Phase 4 — Event id in the URL · not started
+## Phase 4 — Event id in the URL · **shipped**
 
 Do this when an org needs a second event, or an admin needs a second org — not before.
 The layout calls `requireEventScope(eventId)` **once** and hands every child a proven

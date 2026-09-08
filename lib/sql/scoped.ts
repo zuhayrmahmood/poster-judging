@@ -96,7 +96,12 @@ export const DELETE_OWNED_POSTER = `
      and e.id = p.event_id
      and m.org_id = e.org_id
      and m.admin_id = $2
-  returning p.id`;
+  returning p.id, p.event_id`;
+
+// Every scoped mutation returns `event_id` alongside the row id. The caller has only a
+// child id, but revalidatePath() needs the event-scoped route to invalidate — and the
+// event that comes back here is one the ownership join already proved, so the path is
+// derived from verified data rather than from anything the client supplied.
 
 // ---------------------------------------------------------------------------
 // Judges
@@ -117,7 +122,7 @@ export const ROTATE_OWNED_JUDGE_CODE = `
      and e.id = j.event_id
      and m.org_id = e.org_id
      and m.admin_id = $4
-  returning j.id`;
+  returning j.id, j.event_id`;
 
 /** $1 judgeId, $2 active, $3 adminId. */
 export const SET_OWNED_JUDGE_ACTIVE = `
@@ -128,7 +133,7 @@ export const SET_OWNED_JUDGE_ACTIVE = `
      and e.id = j.event_id
      and m.org_id = e.org_id
      and m.admin_id = $3
-  returning j.id`;
+  returning j.id, j.event_id`;
 
 /** $1 judgeId, $2 adminId. */
 export const DELETE_OWNED_JUDGE = `
@@ -138,7 +143,7 @@ export const DELETE_OWNED_JUDGE = `
      and e.id = j.event_id
      and m.org_id = e.org_id
      and m.admin_id = $2
-  returning j.id`;
+  returning j.id, j.event_id`;
 
 // ---------------------------------------------------------------------------
 // Criteria
@@ -153,7 +158,7 @@ export const UPDATE_OWNED_CRITERION = `
      and e.id = c.event_id
      and m.org_id = e.org_id
      and m.admin_id = $6
-  returning c.id`;
+  returning c.id, c.event_id`;
 
 /** $1 criterionId, $2 adminId. */
 export const DELETE_OWNED_CRITERION = `
@@ -163,7 +168,7 @@ export const DELETE_OWNED_CRITERION = `
      and e.id = c.event_id
      and m.org_id = e.org_id
      and m.admin_id = $2
-  returning c.id`;
+  returning c.id, c.event_id`;
 
 // ---------------------------------------------------------------------------
 // Poster drill-down

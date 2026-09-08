@@ -88,13 +88,13 @@ export async function createJudge(
 export async function rotateJudgeCode(
   actor: Actor,
   judgeId: string,
-): Promise<ServiceResult<{ code: string }>> {
+): Promise<ServiceResult<{ code: string; eventId: string }>> {
   if (!isUuid(judgeId)) return notFound();
 
   for (let attempt = 0; attempt < CODE_RETRIES; attempt++) {
     const code = generateCode();
     try {
-      const rows = await query<{ id: string }>(ROTATE_OWNED_JUDGE_CODE, [
+      const rows = await query<{ id: string; event_id: string }>(ROTATE_OWNED_JUDGE_CODE, [
         judgeId,
         hashCode(code, env.judgeCodePepper),
         codeHint(code),
@@ -103,7 +103,7 @@ export async function rotateJudgeCode(
       // Zero rows means the judge is missing or belongs to another organisation. The
       // caller is told the same thing either way.
       if (rows.length === 0) return notFound();
-      return ok({ code });
+      return ok({ code, eventId: rows[0].event_id });
     } catch (error) {
       if (isCodeCollision(error)) continue;
       return fail("conflict", "Couldn't regenerate that code.");
@@ -175,23 +175,23 @@ export async function setJudgeActive(
   actor: Actor,
   judgeId: string,
   active: boolean,
-): Promise<ServiceResult<null>> {
+): Promise<ServiceResult<{ eventId: string }>> {
   if (!isUuid(judgeId)) return notFound();
 
-  const rows = await query<{ id: string }>(SET_OWNED_JUDGE_ACTIVE, [
+  const rows = await query<{ id: string; event_id: string }>(SET_OWNED_JUDGE_ACTIVE, [
     judgeId,
     active,
     actor.id,
   ]);
-  return rows.length === 0 ? notFound() : ok(null);
+  return rows.length === 0 ? notFound() : ok({ eventId: rows[0].event_id });
 }
 
 export async function deleteJudge(
   actor: Actor,
   judgeId: string,
-): Promise<ServiceResult<null>> {
+): Promise<ServiceResult<{ eventId: string }>> {
   if (!isUuid(judgeId)) return notFound();
 
-  const rows = await query<{ id: string }>(DELETE_OWNED_JUDGE, [judgeId, actor.id]);
-  return rows.length === 0 ? notFound() : ok(null);
+  const rows = await query<{ id: string; event_id: string }>(DELETE_OWNED_JUDGE, [judgeId, actor.id]);
+  return rows.length === 0 ? notFound() : ok({ eventId: rows[0].event_id });
 }

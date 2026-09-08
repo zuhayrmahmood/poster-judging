@@ -74,13 +74,13 @@ export async function updateCriterion(
   actor: Actor,
   criterionId: string,
   input: CriterionInput,
-): Promise<ServiceResult<null>> {
+): Promise<ServiceResult<{ eventId: string }>> {
   if (!isUuid(criterionId)) return notFound();
 
   const invalid = validate(input);
   if (invalid) return fail("invalid", invalid);
 
-  const rows = await query<{ id: string }>(UPDATE_OWNED_CRITERION, [
+  const rows = await query<{ id: string; event_id: string }>(UPDATE_OWNED_CRITERION, [
     criterionId,
     input.label.trim(),
     input.description.trim() || null,
@@ -88,18 +88,18 @@ export async function updateCriterion(
     input.maxScore,
     actor.id,
   ]);
-  return rows.length === 0 ? notFound() : ok(null);
+  return rows.length === 0 ? notFound() : ok({ eventId: rows[0].event_id });
 }
 
 export async function deleteCriterion(
   actor: Actor,
   criterionId: string,
-): Promise<ServiceResult<null>> {
+): Promise<ServiceResult<{ eventId: string }>> {
   if (!isUuid(criterionId)) return notFound();
 
-  const rows = await query<{ id: string }>(DELETE_OWNED_CRITERION, [
+  const rows = await query<{ id: string; event_id: string }>(DELETE_OWNED_CRITERION, [
     criterionId,
     actor.id,
   ]);
-  return rows.length === 0 ? notFound() : ok(null);
+  return rows.length === 0 ? notFound() : ok({ eventId: rows[0].event_id });
 }

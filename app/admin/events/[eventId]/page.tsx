@@ -1,26 +1,25 @@
 import Link from "next/link";
 
 import { AutoRefresh } from "@/components/auto-refresh";
-import { requireAdmin } from "@/lib/auth/admin";
-import {
-  getJudgeProgress,
-  getPrimaryEventForAdmin,
-  getResults,
-} from "@/lib/data/admin";
+import { notFound } from "next/navigation";
+
+import { getEventById, getJudgeProgress, getResults } from "@/lib/data/admin";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage({ searchParams }: PageProps<"/admin">) {
-  const admin = await requireAdmin();
+export default async function DashboardPage({
+  params,
+  searchParams,
+}: PageProps<"/admin/events/[eventId]">) {
+  const { eventId } = await params;
 
-  const event = await getPrimaryEventForAdmin(admin.id);
-  if (!event) {
-    return (
-      <p className="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-muted">
-        No event yet. Create one in Settings to get started.
-      </p>
-    );
-  }
+  const event = await getEventById(eventId);
+  // Unreachable in practice: the layout's requireEventScope already 404s an event the
+  // caller cannot reach. Kept so this page is correct if ever rendered on its own.
+  if (!event) notFound();
+
+  // Every link on this page is event-scoped; there is no bare /admin to fall back to.
+  const base = `/admin/events/${eventId}`;
 
   const { mode } = await searchParams;
   const normalized = mode === "normalized";
@@ -72,7 +71,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
           <div className="flex items-center gap-2">
             <div className="flex rounded-lg border border-line p-0.5 text-sm">
               <Link
-                href="/admin"
+                href={base}
                 className={`rounded-md px-3 py-1.5 font-medium ${
                   !normalized ? "bg-accent text-accent-ink" : "text-muted"
                 }`}
@@ -80,7 +79,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                 Raw
               </Link>
               <Link
-                href="/admin?mode=normalized"
+                href={`${base}?mode=normalized`}
                 className={`rounded-md px-3 py-1.5 font-medium ${
                   normalized ? "bg-accent text-accent-ink" : "text-muted"
                 }`}
@@ -90,7 +89,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
             </div>
 
             <a
-              href="/admin/export/results"
+              href={`${base}/export/results`}
               className="rounded-lg border border-line px-3 py-2 text-sm font-medium text-muted hover:text-ink"
             >
               Export CSV
@@ -137,7 +136,7 @@ export default async function DashboardPage({ searchParams }: PageProps<"/admin"
                     <Td className="font-mono text-xs font-semibold">{row.code}</Td>
                     <Td>
                       <Link
-                        href={`/admin/poster/${row.poster_id}`}
+                        href={`${base}/poster/${row.poster_id}`}
                         className="hover:underline"
                       >
                         {row.title}

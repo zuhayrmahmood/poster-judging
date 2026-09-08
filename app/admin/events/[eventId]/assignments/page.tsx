@@ -1,35 +1,32 @@
+import { notFound } from "next/navigation";
+
 import {
   AssignmentsPanel,
   type JudgeLoad,
 } from "@/components/admin/assignments-panel";
 import { autoAssign, loadPerJudge } from "@/lib/assign";
-import { requireAdmin } from "@/lib/auth/admin";
-import { getPosters, getPrimaryEventForAdmin } from "@/lib/data/admin";
+import { getEventById, getPosters } from "@/lib/data/admin";
 import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export default async function AssignmentsPage() {
-  const admin = await requireAdmin();
+export default async function AssignmentsPage({
+  params,
+}: PageProps<"/admin/events/[eventId]/assignments">) {
+  const { eventId } = await params;
 
-  const event = await getPrimaryEventForAdmin(admin.id);
-  if (!event) {
-    return (
-      <p className="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-muted">
-        Create an event in Settings first.
-      </p>
-    );
-  }
+  const event = await getEventById(eventId);
+  if (!event) notFound();
 
   const [posters, activeJudges, existing] = await Promise.all([
-    getPosters(event.id),
+    getPosters(eventId),
     query<{ id: string; name: string }>(
       "select id, name from judges where event_id = $1 and active order by name",
-      [event.id],
+      [eventId],
     ),
     query<{ judge_id: string }>(
       "select judge_id from assignments where event_id = $1",
-      [event.id],
+      [eventId],
     ),
   ]);
 
@@ -56,7 +53,7 @@ export default async function AssignmentsPage() {
 
   return (
     <AssignmentsPanel
-      eventId={event.id}
+      eventId={eventId}
       loads={loads}
       currentTotal={existing?.length ?? 0}
       proposedTotal={plan.length}

@@ -46,6 +46,24 @@ route; use `resolveAdmin()`/`resolveJudge()`, which return null.
 security boundary** — Server Actions and Route Handlers are reachable by direct POST/GET,
 so every one of them re-checks the session itself.
 
+**Admin routes are event-scoped.** Everything organiser-facing lives under
+`/admin/events/[eventId]/…`; `/admin` only decides where to send you, and
+`/admin/events` is the picker. The id is a uuid, not a slug — slugs are unique only
+within an org now, so a slug URL would need `/admin/[orgSlug]/[eventSlug]` and a resolve
+query before the authz query. There is deliberately **no "current event" cookie**: that
+is ambient authority, which is the property that made `getPrimaryEvent()` a security
+bug, and two tabs on two halls would fight over it.
+
+`app/admin/events/[eventId]/layout.tsx` calls `requireEventScope(eventId)` **once** for
+the whole subtree, which is why the pages under it query with the URL's event id
+directly. The export route is the exception and must check for itself — a Route Handler
+has no layout above it.
+
+`revalidatePath` calls in `app/actions/admin.ts` all go through `eventPath()`. They fail
+**silently** when wrong: the write lands and the page never refreshes. Actions holding
+only a child id take the event from the service result, which took it from the row the
+ownership join proved. `tests/revalidate-paths.test.ts` fails if one is hardcoded.
+
 ## Two unrelated auth systems
 
 - **Admins** — Supabase Auth *plus* a row in `admins`; the row is the actual grant.

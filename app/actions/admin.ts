@@ -29,6 +29,19 @@ export type { CriterionInput } from "@/lib/services/criteria";
  * assume the UI is what called it.
  */
 
+/**
+ * Routes are event-scoped now, so every revalidation needs the event id in the path.
+ *
+ * These fail *silently* when wrong — the write lands and the page simply never
+ * refreshes — so they are built here from one place rather than typed out at each of
+ * the eighteen call sites. Actions that hold only a child id get their event from the
+ * service result, which took it from the row the ownership join already proved.
+ */
+function eventPath(eventId: string, tab?: string) {
+  const base = `/admin/events/${eventId}`;
+  return tab ? `${base}/${tab}` : base;
+}
+
 export async function adminSignOut() {
   const supabase = await createServerSupabase();
   await supabase.auth.signOut();
@@ -45,7 +58,8 @@ export async function createEvent(orgId: string, name: string) {
   const result = await events.createEvent(admin, orgId, name);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin", "layout");
+  // The picker is what lists it; there is no event route to revalidate yet.
+  revalidatePath("/admin/events");
   return { error: null };
 }
 
@@ -55,7 +69,10 @@ export async function renameEvent(eventId: string, name: string) {
   const result = await events.renameEvent(admin, eventId, name);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin", "layout");
+  // "layout" because the name and status live in the event layout's header, above
+  // whichever tab is showing.
+  revalidatePath(eventPath(eventId), "layout");
+  revalidatePath("/admin/events");
   return { error: null };
 }
 
@@ -65,7 +82,8 @@ export async function setEventStatus(eventId: string, status: EventStatus) {
   const result = await events.setStatus(admin, eventId, status);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin", "layout");
+  revalidatePath(eventPath(eventId), "layout");
+  revalidatePath("/admin/events");
   return { error: null };
 }
 
@@ -75,7 +93,7 @@ export async function setTargetJudges(eventId: string, target: number) {
   const result = await events.setTargetJudges(admin, eventId, target);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin", "layout");
+  revalidatePath(eventPath(eventId), "layout");
   return { error: null };
 }
 
@@ -92,7 +110,7 @@ export async function createPoster(
   const result = await posters.createPoster(admin, eventId, input);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/posters");
+  revalidatePath(eventPath(eventId, "posters"));
   return { error: null };
 }
 
@@ -102,7 +120,7 @@ export async function deletePoster(posterId: string) {
   const result = await posters.deletePoster(admin, posterId);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/posters");
+  revalidatePath(eventPath(result.data.eventId, "posters"));
   return { error: null };
 }
 
@@ -112,7 +130,7 @@ export async function importPosters(eventId: string, csv: string) {
   const result = await posters.importPosters(admin, eventId, csv);
   if (!result.ok) return { error: result.message, imported: 0 };
 
-  revalidatePath("/admin/posters");
+  revalidatePath(eventPath(eventId, "posters"));
   return { error: null, imported: result.data.imported };
 }
 
@@ -130,7 +148,7 @@ export async function createJudge(eventId: string, name: string, email: string) 
   const result = await judges.createJudge(admin, eventId, name, email);
   if (!result.ok) return { error: result.message, code: null };
 
-  revalidatePath("/admin/judges");
+  revalidatePath(eventPath(eventId, "judges"));
   return { error: null, code: result.data.code };
 }
 
@@ -140,7 +158,7 @@ export async function regenerateJudgeCode(judgeId: string) {
   const result = await judges.rotateJudgeCode(admin, judgeId);
   if (!result.ok) return { error: result.message, code: null };
 
-  revalidatePath("/admin/judges");
+  revalidatePath(eventPath(result.data.eventId, "judges"));
   return { error: null, code: result.data.code };
 }
 
@@ -151,7 +169,7 @@ export async function regenerateAllCodes(eventId: string) {
   const result = await judges.rotateAllCodes(admin, eventId);
   if (!result.ok) return { error: result.message, cards: [] };
 
-  revalidatePath("/admin/judges");
+  revalidatePath(eventPath(eventId, "judges"));
   return { error: null, cards: result.data.cards };
 }
 
@@ -161,7 +179,7 @@ export async function setJudgeActive(judgeId: string, active: boolean) {
   const result = await judges.setJudgeActive(admin, judgeId, active);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/judges");
+  revalidatePath(eventPath(result.data.eventId, "judges"));
   return { error: null };
 }
 
@@ -171,7 +189,7 @@ export async function deleteJudge(judgeId: string) {
   const result = await judges.deleteJudge(admin, judgeId);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/judges");
+  revalidatePath(eventPath(result.data.eventId, "judges"));
   return { error: null };
 }
 
@@ -188,7 +206,7 @@ export async function createCriterion(
   const result = await criteria.createCriterion(admin, eventId, input);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/rubric");
+  revalidatePath(eventPath(eventId, "rubric"));
   return { error: null };
 }
 
@@ -201,7 +219,7 @@ export async function updateCriterion(
   const result = await criteria.updateCriterion(admin, criterionId, input);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/rubric");
+  revalidatePath(eventPath(result.data.eventId, "rubric"));
   return { error: null };
 }
 
@@ -211,7 +229,7 @@ export async function deleteCriterion(criterionId: string) {
   const result = await criteria.deleteCriterion(admin, criterionId);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/rubric");
+  revalidatePath(eventPath(result.data.eventId, "rubric"));
   return { error: null };
 }
 
@@ -225,8 +243,9 @@ export async function runAutoAssign(eventId: string) {
   const result = await assignments.runAutoAssign(admin, eventId);
   if (!result.ok) return { error: result.message, count: 0 };
 
-  revalidatePath("/admin/assignments");
-  revalidatePath("/admin");
+  revalidatePath(eventPath(eventId, "assignments"));
+  // The results table flags posters below target coverage, so it moves too.
+  revalidatePath(eventPath(eventId));
   return { error: null, count: result.data.count };
 }
 
@@ -236,6 +255,7 @@ export async function clearAssignments(eventId: string) {
   const result = await assignments.clearAssignments(admin, eventId);
   if (!result.ok) return { error: result.message };
 
-  revalidatePath("/admin/assignments");
+  revalidatePath(eventPath(eventId, "assignments"));
+  revalidatePath(eventPath(eventId));
   return { error: null };
 }
